@@ -1,0 +1,20 @@
+[package]
+name = "matrix-call"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+matrix-core = { path = "../matrix-core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+url = { workspace = true }
+urlencoding = "2.1"
+matrix-sdk = { workspace = true, features = ["experimental-widgets"] }

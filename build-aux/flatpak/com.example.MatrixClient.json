@@ -1,0 +1,42 @@
+{
+  "app-id": "com.example.MatrixClient",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "50",
+  "sdk": "org.gnome.Sdk",
+  "command": "matrix-desktop",
+  "finish-args": [
+    "--share=network",
+    "--share=ipc",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--socket=pulseaudio",
+    "--device=all",
+    "--filesystem=xdg-run/pipewire-0",
+    "--talk-name=org.freedesktop.Notifications",
+    "--talk-name=org.freedesktop.secrets"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "env": {
+      "CARGO_HOME": "/run/build/matrixclient/cargo"
+    }
+  },
+  "modules": [
+    {
+      "name": "matrixclient",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cargo build --release -p matrix-desktop --features gui",
+        "install -Dm755 target/release/matrix-desktop /app/bin/matrix-desktop",
+        "install -Dm644 data/com.example.MatrixClient.desktop /app/share/applications/com.example.MatrixClient.desktop",
+        "install -Dm644 data/com.example.MatrixClient.metainfo.xml /app/share/metainfo/com.example.MatrixClient.metainfo.xml"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "../.."
+        }
+      ]
+    }
+  ]
+}

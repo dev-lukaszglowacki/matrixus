@@ -1,0 +1,29 @@
+[package]
+name = "matrix-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+url = { workspace = true }
+
+matrix-sdk = { workspace = true, features = [
+    "e2e-encryption",
+    "bundled-sqlite",
+    "experimental-widgets",
+    "markdown"
+] }
+matrix-sdk-ui = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.17"

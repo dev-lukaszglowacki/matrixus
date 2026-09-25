@@ -1,0 +1,30 @@
+[package]
+name = "matrix-desktop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+gui = ["dep:gtk4", "dep:libadwaita", "dep:webkit6", "dep:ashpd", "dep:oo7"]
+
+[dependencies]
+matrix-core = { path = "../matrix-core" }
+matrix-call = { path = "../matrix-call" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+url = { workspace = true }
+
+gtk4 = { workspace = true, optional = true }
+libadwaita = { workspace = true, optional = true }
+webkit6 = { workspace = true, optional = true }
+ashpd = { workspace = true, optional = true }
+oo7 = { workspace = true, optional = true }
