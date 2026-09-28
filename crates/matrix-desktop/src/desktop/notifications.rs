@@ -38,3 +38,9 @@ impl NotificationService {
         info!("Incoming Call Notification: {call_type} from {caller_name} in {room_name}");
     }
 }
+
+impl Default for NotificationService {
+    fn default() -> Self {
+        Self::new()
+    }
+}

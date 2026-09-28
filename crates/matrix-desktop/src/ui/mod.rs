@@ -6,6 +6,9 @@ pub mod sidebar;
 pub mod timeline;
 pub mod window;
 
+#[cfg(feature = "gui")]
+pub mod gtk_app;
+
 pub use call::CallViewController;
 pub use composer::ComposerState;
 pub use sidebar::SidebarState;
