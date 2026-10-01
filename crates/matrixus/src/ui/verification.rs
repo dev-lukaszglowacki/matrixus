@@ -137,30 +137,38 @@ pub fn show_verification_request_dialog(
                             show_sas_dialog(&parent, app, user, transaction_id, emojis);
                         }
                         Ok(VerificationState::Started { transaction_id }) => {
-                            // Poll for emojis on a background task
                             let app2 = app.clone();
                             let user2 = user.clone();
                             let parent = UiSend::new(parent);
                             tokio::spawn(async move {
-                                for _ in 0..30 {
-                                    tokio::time::sleep(std::time::Duration::from_millis(500))
-                                        .await;
-                                    if let Ok(Some(emojis)) =
-                                        app2.get_sas_emojis(&user2, &transaction_id).await
-                                    {
+                                match app2
+                                    .wait_for_sas_emojis(&user2, &transaction_id)
+                                    .await
+                                {
+                                    Ok(VerificationState::ShowEmojis {
+                                        transaction_id,
+                                        emojis,
+                                    }) => {
                                         let app3 = app2.clone();
                                         let user3 = user2.clone();
-                                        let tx3 = transaction_id.clone();
                                         async_ui::on_ui(move || {
                                             show_sas_dialog(
                                                 &parent.into_inner(),
                                                 app3,
                                                 user3,
-                                                tx3,
+                                                transaction_id,
                                                 emojis,
                                             );
                                         });
-                                        return;
+                                    }
+                                    Ok(VerificationState::Cancelled { reason, .. }) => {
+                                        error!("Verification cancelled: {reason}");
+                                    }
+                                    Ok(other) => {
+                                        error!("Unexpected state after wait: {other:?}");
+                                    }
+                                    Err(e) => {
+                                        error!("Failed waiting for SAS emojis: {e}");
                                     }
                                 }
                             });
@@ -365,28 +373,36 @@ fn populate_device_list(
                                 let user2 = user_id.clone();
                                 let parent = UiSend::new(parent);
                                 tokio::spawn(async move {
-                                    for _ in 0..40 {
-                                        tokio::time::sleep(std::time::Duration::from_millis(500))
-                                            .await;
-                                        if let Ok(Some(emojis)) =
-                                            app2.get_sas_emojis(&user2, &transaction_id).await
-                                        {
+                                    match app2
+                                        .wait_for_sas_emojis(&user2, &transaction_id)
+                                        .await
+                                    {
+                                        Ok(VerificationState::ShowEmojis {
+                                            transaction_id,
+                                            emojis,
+                                        }) => {
                                             let app3 = app2.clone();
                                             let user3 = user2.clone();
-                                            let tx = transaction_id.clone();
                                             async_ui::on_ui(move || {
                                                 show_sas_dialog(
                                                     &parent.into_inner(),
                                                     app3,
                                                     user3,
-                                                    tx,
+                                                    transaction_id,
                                                     emojis,
                                                 );
                                             });
-                                            return;
+                                        }
+                                        Ok(VerificationState::Cancelled { reason, .. }) => {
+                                            error!("Verification cancelled: {reason}");
+                                        }
+                                        Ok(other) => {
+                                            error!("Unexpected state after wait: {other:?}");
+                                        }
+                                        Err(e) => {
+                                            error!("Timed out / failed waiting for SAS emojis: {e}");
                                         }
                                     }
-                                    error!("Timed out waiting for SAS emojis");
                                 });
                             }
                             Ok(other) => error!("Unexpected verification state: {other:?}"),

@@ -55,6 +55,73 @@ impl MatrixClient {
         &self.inner
     }
 
+    /// Register handlers that surface incoming verification requests on `tx`.
+    ///
+    /// Call once after login / session restore so the UI can show the accept dialog
+    /// when another device starts verification toward us.
+    pub fn register_verification_handlers(
+        &self,
+        tx: tokio::sync::broadcast::Sender<crate::sync::SyncEvent>,
+    ) {
+        use matrix_sdk::ruma::events::{
+            key::verification::request::ToDeviceKeyVerificationRequestEvent,
+            room::message::{MessageType, OriginalSyncRoomMessageEvent},
+        };
+
+        let client = self.inner.clone();
+        let tx1 = tx.clone();
+        self.inner.add_event_handler(
+            move |ev: ToDeviceKeyVerificationRequestEvent, c: Client| async move {
+                let other_user = ev.sender.to_string();
+                let transaction_id = ev.content.transaction_id.to_string();
+                let other_device = ev.content.from_device.to_string();
+                info!(
+                    "Incoming to-device verification request from {other_user} / {other_device}"
+                );
+                // Ensure the request object exists in the crypto store.
+                let _ = c
+                    .encryption()
+                    .get_verification_request(&ev.sender, &ev.content.transaction_id)
+                    .await;
+                let _ = tx1.send(crate::sync::SyncEvent::VerificationChanged(
+                    VerificationState::Requested {
+                        transaction_id,
+                        other_user,
+                        other_device,
+                    },
+                ));
+            },
+        );
+
+        let tx2 = tx;
+        self.inner.add_event_handler(
+            move |ev: OriginalSyncRoomMessageEvent, c: Client| async move {
+                if let MessageType::VerificationRequest(content) = &ev.content.msgtype {
+                    let other_user = ev.sender.to_string();
+                    let transaction_id = ev.event_id.to_string();
+                    let other_device = content.from_device.to_string();
+                    info!(
+                        "Incoming in-room verification request from {other_user} / {other_device}"
+                    );
+                    let _ = c
+                        .encryption()
+                        .get_verification_request(&ev.sender, &ev.event_id)
+                        .await;
+                    let _ = tx2.send(crate::sync::SyncEvent::VerificationChanged(
+                        VerificationState::Requested {
+                            transaction_id,
+                            other_user,
+                            other_device,
+                        },
+                    ));
+                }
+            },
+        );
+
+        // Silence unused if Client import path differs in handler signature.
+        let _ = client;
+    }
+
     /// Check if client is currently authenticated
     pub fn is_logged_in(&self) -> bool {
         self.inner.matrix_auth().logged_in()
@@ -373,6 +440,10 @@ impl MatrixClient {
     }
 
     /// Request an outgoing SAS verification with another of the current user's devices.
+    ///
+    /// Returns `Started` immediately. Call [`wait_for_sas_emojis`] afterwards — it drives
+    /// the SAS state machine (accept + key exchange) via the SDK change stream until
+    /// emojis are ready or the flow is cancelled/times out.
     pub async fn start_device_verification(
         &self,
         other_device_id: &str,
@@ -398,10 +469,126 @@ impl MatrixClient {
         let tx_id = sas.flow_id().to_string();
         info!("Started verification with device {other_device_id}: {tx_id}");
 
-        // Emojis may not be ready until the other side accepts; return Started for now.
+        // Emojis are only available after the other side accepts and keys are exchanged.
         Ok(VerificationState::Started {
             transaction_id: tx_id,
         })
+    }
+
+    /// Drive an in-progress SAS verification until emojis are ready (or timeout/cancel).
+    ///
+    /// Uses the SDK `SasVerification::changes()` stream so we correctly accept the flow
+    /// and wait for `KeysExchanged` instead of blind-polling.
+    pub async fn wait_for_sas_emojis(
+        &self,
+        other_user: &str,
+        transaction_id: &str,
+    ) -> Result<VerificationState> {
+        use futures_util::StreamExt;
+        use matrix_sdk::encryption::verification::SasState;
+        use matrix_sdk::ruma::UserId;
+        use std::time::Duration;
+
+        let user_id = <&UserId>::try_from(other_user)
+            .map_err(|e| MatrixError::Other(format!("Invalid user id: {e}")))?;
+
+        // Allow up to 2 minutes for the other device to accept and complete key exchange.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+
+        loop {
+            if tokio::time::Instant::now() > deadline {
+                return Err(MatrixError::Other(
+                    "Timed out waiting for SAS emojis — did the other device accept?".into(),
+                ));
+            }
+
+            let Some(verification) = self
+                .inner
+                .encryption()
+                .get_verification(user_id, transaction_id)
+                .await
+            else {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                continue;
+            };
+
+            let Some(sas) = verification.sas() else {
+                // Still a bare VerificationRequest — keep waiting for transition to SAS.
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                continue;
+            };
+
+            // Already presentable?
+            if let Some(emoji_list) = sas.emoji() {
+                let emojis = emoji_list
+                    .iter()
+                    .map(|e| SasEmoji {
+                        symbol: e.symbol.to_string(),
+                        description: e.description.to_string(),
+                    })
+                    .collect();
+                return Ok(VerificationState::ShowEmojis {
+                    transaction_id: transaction_id.to_string(),
+                    emojis,
+                });
+            }
+
+            // Accept if we haven't yet (required on the responder; harmless if already accepted).
+            if let Err(e) = sas.accept().await {
+                warn!("sas.accept() note: {e}");
+            }
+
+            // Listen for state changes until KeysExchanged / Done / Cancelled.
+            let mut stream = sas.changes();
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let result = tokio::time::timeout(remaining, async {
+                while let Some(state) = stream.next().await {
+                    match state {
+                        SasState::KeysExchanged { emojis, .. } => {
+                            if let Some(list) = emojis {
+                                let mapped = list
+                                    .emojis
+                                    .iter()
+                                    .map(|e| SasEmoji {
+                                        symbol: e.symbol.to_string(),
+                                        description: e.description.to_string(),
+                                    })
+                                    .collect();
+                                return Ok(VerificationState::ShowEmojis {
+                                    transaction_id: transaction_id.to_string(),
+                                    emojis: mapped,
+                                });
+                            }
+                        }
+                        SasState::Done { .. } => {
+                            return Ok(VerificationState::Done {
+                                transaction_id: transaction_id.to_string(),
+                            });
+                        }
+                        SasState::Cancelled(info) => {
+                            return Ok(VerificationState::Cancelled {
+                                transaction_id: transaction_id.to_string(),
+                                reason: info.reason().to_string(),
+                            });
+                        }
+                        // Created / Started / Accepted / Confirmed — keep waiting
+                        _ => {}
+                    }
+                }
+                Err(MatrixError::Other("SAS change stream ended unexpectedly".into()))
+            })
+            .await;
+
+            match result {
+                Ok(Ok(state)) => return Ok(state),
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    return Err(MatrixError::Other(
+                        "Timed out waiting for SAS emojis — did the other device accept?".into(),
+                    ));
+                }
+            }
+        }
     }
 
     /// Read current SAS emoji list for an in-progress verification, if available.
@@ -487,7 +674,15 @@ impl MatrixClient {
         let user_id = <&UserId>::try_from(other_user)
             .map_err(|e| MatrixError::Other(format!("Invalid user id: {e}")))?;
 
-        if let Some(verification) = self
+        // Prefer cancelling a VerificationRequest if still at that stage.
+        if let Some(request) = self
+            .inner
+            .encryption()
+            .get_verification_request(user_id, transaction_id)
+            .await
+        {
+            let _ = request.cancel().await;
+        } else if let Some(verification) = self
             .inner
             .encryption()
             .get_verification(user_id, transaction_id)
@@ -504,48 +699,143 @@ impl MatrixClient {
         })
     }
 
-    /// Accept an incoming verification request.
+    /// Accept an incoming verification request and drive it until SAS emojis are ready.
     pub async fn accept_verification(
         &self,
         other_user: &str,
         transaction_id: &str,
     ) -> Result<VerificationState> {
+        use futures_util::StreamExt;
+        use matrix_sdk::encryption::verification::{
+            SasState, Verification, VerificationRequestState,
+        };
         use matrix_sdk::ruma::UserId;
 
         let user_id = <&UserId>::try_from(other_user)
             .map_err(|e| MatrixError::Other(format!("Invalid user id: {e}")))?;
 
-        let verification = self
+        // 1) Prefer VerificationRequest path (incoming m.key.verification.request).
+        if let Some(request) = self
+            .inner
+            .encryption()
+            .get_verification_request(user_id, transaction_id)
+            .await
+        {
+            request
+                .accept()
+                .await
+                .map_err(|e| MatrixError::Other(format!("accept request failed: {e}")))?;
+            info!("Accepted verification request {transaction_id}");
+
+            let mut stream = request.changes();
+            let sas = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                while let Some(state) = stream.next().await {
+                    match state {
+                        VerificationRequestState::Transitioned { verification } => {
+                            if let Verification::SasV1(s) = verification {
+                                return Ok(s);
+                            }
+                        }
+                        VerificationRequestState::Cancelled(info) => {
+                            return Err(MatrixError::Other(format!(
+                                "Verification cancelled: {}",
+                                info.reason()
+                            )));
+                        }
+                        VerificationRequestState::Done => {
+                            return Err(MatrixError::Other(
+                                "Verification finished before SAS started".into(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                Err(MatrixError::Other(
+                    "Verification request stream ended before SAS".into(),
+                ))
+            })
+            .await
+            .map_err(|_| {
+                MatrixError::Other("Timed out waiting for SAS after accepting request".into())
+            })??;
+
+            // Accept SAS and wait for emojis.
+            sas.accept()
+                .await
+                .map_err(|e| MatrixError::Other(format!("sas.accept failed: {e}")))?;
+
+            let mut sas_stream = sas.changes();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                while let Some(state) = sas_stream.next().await {
+                    match state {
+                        SasState::KeysExchanged { emojis, .. } => {
+                            if let Some(list) = emojis {
+                                let mapped = list
+                                    .emojis
+                                    .iter()
+                                    .map(|e| SasEmoji {
+                                        symbol: e.symbol.to_string(),
+                                        description: e.description.to_string(),
+                                    })
+                                    .collect();
+                                return Ok(VerificationState::ShowEmojis {
+                                    transaction_id: transaction_id.to_string(),
+                                    emojis: mapped,
+                                });
+                            }
+                        }
+                        SasState::Cancelled(info) => {
+                            return Ok(VerificationState::Cancelled {
+                                transaction_id: transaction_id.to_string(),
+                                reason: info.reason().to_string(),
+                            });
+                        }
+                        SasState::Done { .. } => {
+                            return Ok(VerificationState::Done {
+                                transaction_id: transaction_id.to_string(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                Err(MatrixError::Other("SAS stream ended before emojis".into()))
+            })
+            .await
+            .map_err(|_| MatrixError::Other("Timed out waiting for SAS emojis".into()))??;
+
+            return Ok(result);
+        }
+
+        // 2) Already an SAS verification object.
+        if let Some(verification) = self
             .inner
             .encryption()
             .get_verification(user_id, transaction_id)
             .await
-            .ok_or_else(|| {
-                MatrixError::Other(format!("Verification {transaction_id} not found"))
-            })?;
-
-        // Accept SAS side when the flow is already an SAS verification.
-        // Incoming VerificationRequest is handled separately when exposed by the SDK.
-        if let Some(sas) = verification.sas() {
-            let _ = sas.accept().await;
-            if let Some(emoji_list) = sas.emoji() {
-                let emojis = emoji_list
-                    .iter()
-                    .map(|e| SasEmoji {
-                        symbol: e.symbol.to_string(),
-                        description: e.description.to_string(),
-                    })
-                    .collect();
-                return Ok(VerificationState::ShowEmojis {
-                    transaction_id: transaction_id.to_string(),
-                    emojis,
-                });
+        {
+            if let Some(sas) = verification.sas() {
+                let _ = sas.accept().await;
+                if let Some(emoji_list) = sas.emoji() {
+                    let emojis = emoji_list
+                        .iter()
+                        .map(|e| SasEmoji {
+                            symbol: e.symbol.to_string(),
+                            description: e.description.to_string(),
+                        })
+                        .collect();
+                    return Ok(VerificationState::ShowEmojis {
+                        transaction_id: transaction_id.to_string(),
+                        emojis,
+                    });
+                }
+                // Fall through to stream wait via wait_for_sas_emojis.
+                return self.wait_for_sas_emojis(other_user, transaction_id).await;
             }
         }
 
-        Ok(VerificationState::Started {
-            transaction_id: transaction_id.to_string(),
-        })
+        Err(MatrixError::Other(format!(
+            "Verification {transaction_id} not found"
+        )))
     }
 }
 

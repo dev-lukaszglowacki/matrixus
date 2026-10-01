@@ -1,7 +1,8 @@
 //! Application coordinator managing matrix client, sync loop, and UI state
 
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::
+{broadcast, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -32,10 +33,17 @@ pub struct MatrixusApp {
 }
 
 impl MatrixusApp {
-    pub fn new() -> Self {
+    /// Base directory for session + crypto store (`~/.local/share/matrixus`).
+    fn data_dir() -> std::path::PathBuf {
         let home_dir = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let session_path = std::path::PathBuf::from(home_dir)
-            .join(".local/share/matrixus/session.json");
+        std::path::PathBuf::from(home_dir).join(".local/share/matrixus")
+    }
+
+    pub fn new() -> Self {
+        let data_dir = Self::data_dir();
+        // Ensure the directory exists so sqlite_store and session.json can be written.
+        let _ = std::fs::create_dir_all(&data_dir);
+        let session_path = data_dir.join("session.json");
 
         let settings = AppSettings::load();
         let notifications = NotificationService::new();
@@ -58,7 +66,8 @@ impl MatrixusApp {
         match self.session_store.load_session().await {
             Ok(Some(session)) => {
                 info!("Found stored session for {}", session.user_id);
-                match MatrixClient::new(session.homeserver_url.as_str(), None).await {
+                // Pass a persistent data dir so the Olm account + OTKs survive restarts.
+                match MatrixClient::new(session.homeserver_url.as_str(), Some(Self::data_dir())).await {
                     Ok(client) => {
                         if let Err(e) = client.restore_session(&session).await {
                             error!("Failed to restore session: {e}");
@@ -79,7 +88,9 @@ impl MatrixusApp {
 
     /// Authenticate with credentials and store session
     pub async fn login(&self, homeserver: &str, user: &str, pass: &str) -> anyhow::Result<()> {
-        let client = MatrixClient::new(homeserver, None).await?;
+        // Persistent crypto store is required — without it the SDK re-uploads
+        // the same one-time key IDs on every run and the homeserver returns 400.
+        let client = MatrixClient::new(homeserver, Some(Self::data_dir())).await?;
         let session = client.login_with_password(user, pass).await?;
         self.session_store.save_session(&session).await?;
         *self.client.lock().await = Some(client);
@@ -127,8 +138,10 @@ impl MatrixusApp {
             }
         };
 
-        let (service, _rx) = SyncService::new(client);
+        let (service, _rx) = SyncService::new(client.clone());
         let tx = service.event_sender_clone();
+        // Surface incoming verification requests (to-device + in-room) to the UI.
+        client.register_verification_handlers(tx.clone());
         *self.sync_tx.lock().await = Some(tx);
 
         let handle = tokio::spawn(async move {
@@ -410,6 +423,23 @@ impl MatrixusApp {
         Ok(client.get_sas_emojis(other_user, transaction_id).await?)
     }
 
+    /// Drive SAS until emojis are ready (accept + key exchange via SDK streams).
+    /// Clones the client so the mutex is not held for the duration of the wait.
+    pub async fn wait_for_sas_emojis(
+        &self,
+        other_user: &str,
+        transaction_id: &str,
+    ) -> anyhow::Result<VerificationState> {
+        let client = {
+            let guard = self.client.lock().await;
+            guard
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Not logged in"))?
+        };
+        Ok(client.wait_for_sas_emojis(other_user, transaction_id).await?)
+    }
+
     pub async fn confirm_sas(
         &self,
         other_user: &str,
@@ -439,13 +469,18 @@ impl MatrixusApp {
         other_user: &str,
         transaction_id: &str,
     ) -> anyhow::Result<VerificationState> {
-        let guard = self.client.lock().await;
-        let client = guard
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        // Clone so we don't hold the mutex across the potentially long SAS wait.
+        let client = {
+            let guard = self.client.lock().await;
+            guard
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Not logged in"))?
+        };
         Ok(client.accept_verification(other_user, transaction_id).await?)
     }
 }
+
 
 
 
