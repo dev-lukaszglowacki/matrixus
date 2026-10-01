@@ -1,68 +1,142 @@
-# Linux Desktop Matrix Client
+# Matrixus
 
-A native, high-performance Linux desktop client for the [Matrix open standard](https://matrix.org/) built with Rust, GTK4 / Libadwaita, and modern **MatrixRTC** video calling.
+A native Linux desktop client for the [Matrix](https://matrix.org/) open standard.
 
-## Key Features
+Built with **Rust**, **GTK4 / Libadwaita**, and the official [`matrix-rust-sdk`](https://github.com/matrix-org/matrix-rust-sdk). Targets GNOME / Wayland with MatrixRTC video calling via Element Call.
 
-- **Matrix Core Engine (`matrix-core`)**:
-  - Built on `matrix-rust-sdk` (v0.19) with sliding sync (Matrix 2.0).
-  - End-to-End Encryption (E2EE) powered by pure-Rust **Vodozemac** (Megolm & Olm).
-  - Interactive SAS (Short Authentication String) emoji device verification.
-  - Session persistence and encrypted SQLite state storage.
-- **MatrixRTC Video Calling Engine (`matrix-call`)**:
-  - Native MatrixRTC (MSC3401 & MSC4143) room state signaling.
-  - Element Call widget integration via Matrix Widget API (MSC1236 & MSC2762) postMessage bridge.
-  - Full support for 1:1 calls, group conferences, and screen sharing via Wayland `xdg-desktop-portal`.
-- **Linux Desktop & GNOME Integration (`matrix-desktop`)**:
-  - Follows GNOME Human Interface Guidelines (Libadwaita / Wayland native).
-  - FreeDesktop notifications (`org.freedesktop.Notifications`) with incoming call `[Accept]` and `[Decline]` actions.
-  - PipeWire audio/video capture and Wayland ScreenCast portal support.
-  - Flatpak manifest targeting `org.gnome.Platform//50`.
+**App ID:** `com.matrixus.Matrixus`  
+**Repository:** https://github.com/dev-lukaszglowacki/matrixus
 
-## Architecture Overview
+---
+
+## Status
+
+GUI development phases **1–7 are complete**.
+
+| Area | Status |
+|------|--------|
+| Login / session restore | ✅ |
+| Room list (search, unread, 🔒) | ✅ |
+| Timeline + send messages | ✅ |
+| Live sync + offline banner | ✅ |
+| Encryption / SAS verification UI | ✅ |
+| MatrixRTC calls (Element Call) | ✅ |
+| Settings, shortcuts, theme, notifications | ✅ |
+| Flatpak / AppStream packaging metadata | ✅ |
+
+Optional follow-ups: StatusNotifierItem tray applet, broader UI tests / CI packaging.
+
+See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for the detailed roadmap.
+
+---
+
+## Features
+
+### Core (`matrix-core`)
+- `matrix-rust-sdk` 0.19 with E2EE (Vodozemac) and SQLite store
+- Password login, session persistence, auto-restore
+- Room list, timeline fetch, text messaging
+- Crypto status, device list, SAS verification helpers
+- Background sync service with connection events
+
+### Calls (`matrix-call`)
+- MatrixRTC-oriented call session state machine
+- Element Call URL builder and Widget API message types
+- Mute / video / screen-share / hang-up session flags
+
+### Desktop app (`matrixus`)
+- GTK4 + Libadwaita UI (GNOME HIG)
+- Login page, split view (sidebar + timeline + composer)
+- Live sidebar/timeline updates and offline banner
+- Security dialog and SAS emoji verification
+- WebKitGTK Element Call window with media controls
+- `ashpd` camera / ScreenCast portal helpers
+- Preferences: theme (system/light/dark), notifications, close-to-background, Element Call URL
+- Keyboard shortcuts, GNotifications, About dialog
+- Config: `~/.config/matrixus/settings.json`  
+  Session: `~/.local/share/matrixus/session.json`
+
+---
+
+## Architecture
 
 ```text
-matrixclient/
-├── Cargo.toml                          # Workspace definition
+matrixus/                          # workspace root
+├── Cargo.toml
 ├── crates/
-│   ├── matrix-core/                    # Matrix SDK client, auth, sliding sync, E2EE, SQLite
-│   │   └── src/
-│   │       ├── client.rs               # High-level client API & message dispatch
-│   │       ├── crypto.rs               # E2EE & SAS device verification
-│   │       ├── error.rs                # Typed errors
-│   │       ├── room.rs                 # Room and timeline event models
-│   │       ├── session.rs              # Session persistence store
-│   │       └── sync.rs                 # Sliding sync event stream
-│   ├── matrix-call/                    # Video & voice calling engine
-│   │   └── src/
-│   │       ├── call.rs                 # Call session state machine & participant tracking
-│   │       └── widget.rs               # Element Call Widget API postMessage protocol bridge
-│   └── matrix-desktop/                 # Linux desktop application layer
+│   ├── matrix-core/               # SDK, auth, rooms, timeline, E2EE, sync
+│   ├── matrix-call/               # Call session + Element Call widget types
+│   └── matrixus/                  # GTK4 / Libadwaita application (binary)
 │       └── src/
-│           ├── app.rs                  # Application controller & lifecycle
-│           ├── desktop/                # Notifications, Secret Service, Portals
-│           └── ui/                     # GTK4 / Libadwaita view controllers & Call window
-├── data/                               # Desktop entry and AppStream metadata
-└── build-aux/flatpak/                  # Flatpak manifest (GNOME 50 runtime)
+│           ├── main.rs
+│           ├── app.rs             # MatrixusApp coordinator
+│           ├── settings.rs        # AppSettings persistence
+│           ├── desktop/           # GNotifications, XDG portals
+│           └── ui/
+│               ├── gtk_app.rs     # Shell, shortcuts, main window
+│               ├── login.rs
+│               ├── settings.rs    # Preferences UI
+│               ├── verification.rs
+│               ├── sidebar.rs / timeline.rs / composer.rs
+│               └── call/          # Call window + WebKit host
+├── data/
+│   ├── com.matrixus.Matrixus.desktop
+│   └── com.matrixus.Matrixus.metainfo.xml
+└── build-aux/flatpak/
+    └── com.matrixus.Matrixus.json
 ```
 
-## Building & Testing
+---
 
-### Running Automated Tests
+## Building
+
+### Dependencies (Fedora)
+
+```bash
+sudo dnf install -y gtk4-devel libadwaita-devel webkitgtk6.0-devel
+```
+
+### Run the GUI
+
+```bash
+cargo run -p matrixus --features gui
+```
+
+Optional environment:
+
+```bash
+export RUST_LOG=matrixus=info,matrix_core=info
+export ELEMENT_CALL_URL=https://call.element.io   # default
+```
+
+### Tests
+
 ```bash
 cargo test --workspace
 ```
 
-### Host Compilation with GTK4 / Libadwaita
-On Fedora Workstation:
-```bash
-sudo dnf install -y gtk4-devel libadwaita-devel webkitgtk6.0-devel
-cargo build -p matrix-desktop --features gui
-```
+### Flatpak
 
-### Running with Flatpak
 ```bash
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak install --user -y flathub org.gnome.Sdk//50 org.gnome.Platform//50
-flatpak-builder --user --install --force-clean build build-aux/flatpak/com.example.MatrixClient.json
+flatpak-builder --user --install --force-clean build build-aux/flatpak/com.matrixus.Matrixus.json
 ```
+
+---
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+,` | Preferences |
+| `Ctrl+Q` | Quit |
+| `Ctrl+K` / `Ctrl+F` | Focus room filter |
+| `Ctrl+L` | Focus message composer |
+| `Enter` | Send message (when enabled in settings) |
+
+---
+
+## License
+
+Apache-2.0

@@ -1,5 +1,5 @@
 [package]
-name = "matrix-desktop"
+name = "matrixus"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

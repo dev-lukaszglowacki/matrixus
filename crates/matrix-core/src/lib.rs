@@ -8,7 +8,10 @@ pub mod session;
 pub mod sync;
 
 pub use client::MatrixClient;
-pub use crypto::{DeviceTrustLevel, SasEmoji, VerificationState};
+pub use crypto::{
+    sas_emoji_by_index, CryptoStatus, DeviceInfo, DeviceTrustLevel, RoomEncryptionInfo, SasEmoji,
+    VerificationState,
+};
 pub use error::{MatrixError, Result};
 pub use room::{EventContent, RoomSummary, TimelineEvent};
 pub use session::{FileSessionStore, MatrixSession, SessionStore};
