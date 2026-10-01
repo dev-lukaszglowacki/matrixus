@@ -18,12 +18,10 @@ pub fn show_settings_window(
 ) {
     let parent_win = parent.upcast_ref::<gtk4::Window>().clone();
 
-    let window = adw::PreferencesWindow::builder()
-        .transient_for(&parent_win)
-        .modal(true)
+    let window = adw::PreferencesDialog::builder()
         .search_enabled(true)
+        .title("Preferences")
         .build();
-    window.set_title(Some("Preferences"));
 
     // ── General ─────────────────────────────────────────────────────────────
     let general = adw::PreferencesPage::builder()
@@ -222,7 +220,7 @@ pub fn show_settings_window(
         });
     }
 
-    window.present();
+    window.present(Some(&parent_win));
 }
 
 /// Apply theme preference to the global Adw style manager.
