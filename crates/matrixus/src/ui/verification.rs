@@ -20,9 +20,7 @@ pub fn show_sas_dialog(
     emojis: Vec<SasEmoji>,
 ) {
     let parent_win = parent.upcast_ref::<gtk4::Window>().clone();
-    let dialog = adw::MessageDialog::builder()
-        .transient_for(&parent_win)
-        .modal(true)
+    let dialog = adw::AlertDialog::builder()
         .heading("Verify device")
         .body("Compare these emojis with the other device. They must match in order.")
         .build();
@@ -89,7 +87,7 @@ pub fn show_sas_dialog(
         }
     });
 
-    dialog.present();
+    dialog.present(Some(&parent_win));
 }
 
 /// Incoming verification request dialog.
@@ -101,9 +99,7 @@ pub fn show_verification_request_dialog(
     transaction_id: String,
 ) {
     let parent_win = parent.upcast_ref::<gtk4::Window>().clone();
-    let dialog = adw::MessageDialog::builder()
-        .transient_for(&parent_win)
-        .modal(true)
+    let dialog = adw::AlertDialog::builder()
         .heading("Incoming verification")
         .body(&format!(
             "Device {other_device} of {other_user} wants to verify with this session."
@@ -184,7 +180,7 @@ pub fn show_verification_request_dialog(
         }
     });
 
-    dialog.present();
+    dialog.present(Some(&parent_win));
 }
 
 /// Security / devices dialog.
