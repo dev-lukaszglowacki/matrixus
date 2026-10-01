@@ -1,0 +1,49 @@
+{
+  "app-id": "com.matrixus.Matrixus",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "50",
+  "sdk": "org.gnome.Sdk",
+  "command": "matrixus",
+  "finish-args": [
+    "--share=network",
+    "--share=ipc",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--socket=pulseaudio",
+    "--device=dri",
+    "--device=all",
+    "--filesystem=xdg-run/pipewire-0",
+    "--filesystem=xdg-config/matrixus:create",
+    "--filesystem=xdg-data/matrixus:create",
+    "--talk-name=org.freedesktop.Notifications",
+    "--talk-name=org.freedesktop.secrets",
+    "--talk-name=org.freedesktop.portal.Desktop",
+    "--talk-name=org.freedesktop.portal.Camera",
+    "--talk-name=org.freedesktop.portal.ScreenCast",
+    "--own-name=com.matrixus.Matrixus"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "env": {
+      "CARGO_HOME": "/run/build/matrixus/cargo"
+    }
+  },
+  "modules": [
+    {
+      "name": "matrixus",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cargo build --release -p matrixus --features gui",
+        "install -Dm755 target/release/matrixus /app/bin/matrixus",
+        "install -Dm644 data/com.matrixus.Matrixus.desktop /app/share/applications/com.matrixus.Matrixus.desktop",
+        "install -Dm644 data/com.matrixus.Matrixus.metainfo.xml /app/share/metainfo/com.matrixus.Matrixus.metainfo.xml"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "../.."
+        }
+      ]
+    }
+  ]
+}

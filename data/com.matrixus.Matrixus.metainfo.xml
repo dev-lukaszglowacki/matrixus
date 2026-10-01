@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.matrixus.Matrixus</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>Matrixus</name>
+  <summary>Native Linux Matrix client with MatrixRTC video calls</summary>
+  <description>
+    <p>
+      Matrixus is a modern, fast, native Linux desktop client for the Matrix
+      communication protocol. It features end-to-end encryption, a GNOME-friendly
+      interface built with GTK4 and Libadwaita, and voice/video calls powered by
+      MatrixRTC and Element Call.
+    </p>
+    <p>Highlights:</p>
+    <ul>
+      <li>Encrypted messaging with session restore</li>
+      <li>Live room list and timeline sync</li>
+      <li>Device verification (SAS emoji)</li>
+      <li>Video and voice calls via Element Call</li>
+      <li>Desktop notifications and system theme support</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">com.matrixus.Matrixus.desktop</launchable>
+  <url type="homepage">https://github.com/dev-lukaszglowacki/matrixus</url>
+  <url type="bugtracker">https://github.com/dev-lukaszglowacki/matrixus/issues</url>
+  <categories>
+    <category>Network</category>
+    <category>Chat</category>
+    <category>InstantMessaging</category>
+    <category>VideoConference</category>
+  </categories>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <supports>
+    <control>touch</control>
+  </supports>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-10-01">
+      <description>
+        <p>Initial development release with login, messaging, sync, encryption UI, and MatrixRTC calls.</p>
+      </description>
+    </release>
+  </releases>
+  <developer_name>Matrixus Developers</developer_name>
+</component>
