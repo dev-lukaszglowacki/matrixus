@@ -211,6 +211,9 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
         .build();
 
     let sidebar_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    sidebar_box.set_hexpand(true);
+    sidebar_box.set_vexpand(true);
+
     let sidebar_header = gtk4::Label::builder()
         .label("Rooms")
         .css_classes(["title-4"])
@@ -249,6 +252,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
     let timeline_scrolled = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .vscrollbar_policy(gtk4::PolicyType::Automatic)
+        .hexpand(true)
         .vexpand(true)
         .child(&timeline_list)
         .build();
@@ -402,6 +406,8 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
 
     // ── Content column (timeline + composer) ────────────────────────────────
     let content_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    content_box.set_hexpand(true);
+    content_box.set_vexpand(true);
     content_box.append(&timeline_scrolled);
     content_box.append(&composer_box);
 
@@ -416,15 +422,21 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
     split.set_content(Some(&content_page));
     split.set_min_sidebar_width(240.0);
     split.set_max_sidebar_width(360.0);
+    split.set_hexpand(true);
+    split.set_vexpand(true);
 
     // ── Outer layout: banner above toolbar ──────────────────────────────────
     let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    outer.set_hexpand(true);
+    outer.set_vexpand(true);
     outer.append(&status_banner);
 
     // ── Toolbar view (header + split) ───────────────────────────────────────
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&split));
+    toolbar.set_hexpand(true);
+    toolbar.set_vexpand(true);
     outer.append(&toolbar);
 
     window.set_content(Some(&outer));
