@@ -62,18 +62,29 @@ impl NotificationService {
 
             let title = room_name.to_string();
             let body = format!("{sender_name}: {body_preview}");
+            // Unique id so successive messages stack rather than replace each other.
+            let notif_id = format!(
+                "matrix-message-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0)
+            );
             glib::MainContext::default().invoke(move || {
-                let app = gtk4::Application::default();
-                let notif = gio::Notification::new(&title);
-                notif.set_body(Some(&body));
-                notif.set_priority(gio::NotificationPriority::Normal);
-                notif.set_category(Some("im.received"));
-                // GtkApplicationExt::send_notification
-                gio::prelude::ApplicationExt::send_notification(
-                    &app,
-                    Some("matrix-message"),
-                    &notif,
-                );
+                // Use the running GApplication (registered as com.matrixus.Matrixus).
+                if let Some(app) = gio::Application::default() {
+                    let notif = gio::Notification::new(&title);
+                    notif.set_body(Some(&body));
+                    notif.set_priority(gio::NotificationPriority::Normal);
+                    notif.set_category(Some("im.received"));
+                    gio::prelude::ApplicationExt::send_notification(
+                        &app,
+                        Some(notif_id.as_str()),
+                        &notif,
+                    );
+                } else {
+                    tracing::warn!("No default GApplication; cannot send desktop notification");
+                }
             });
         }
     }

@@ -15,6 +15,8 @@ pub struct RoomSummary {
     pub avatar_url: Option<String>,
     /// Whether this is a 1:1 direct message room
     pub is_direct: bool,
+    /// Whether this room is a Matrix Space (`m.space`)
+    pub is_space: bool,
     /// Whether End-to-End Encryption (Megolm) is active
     pub is_encrypted: bool,
     /// Count of unread highlight / notification events
@@ -23,6 +25,23 @@ pub struct RoomSummary {
     pub has_active_call: bool,
     /// Latest timeline event for preview
     pub last_event: Option<TimelineEvent>,
+}
+
+/// Options for creating a group room (chat) or space.
+#[derive(Debug, Clone, Default)]
+pub struct CreateRoomOptions {
+    /// Display name
+    pub name: String,
+    /// Optional topic / description
+    pub topic: Option<String>,
+    /// User IDs to invite (e.g. `@alice:matrix.org`)
+    pub invite: Vec<String>,
+    /// If true, enable Megolm encryption at creation time
+    pub encrypted: bool,
+    /// If true, create as a public (world-joinable) room; otherwise private
+    pub is_public: bool,
+    /// If true, create as a Matrix Space (`type: m.space`)
+    pub is_space: bool,
 }
 
 /// Aggregated emoji reaction on a message
@@ -34,6 +53,9 @@ pub struct ReactionSummary {
     pub count: u32,
     /// Whether the current account has reacted with this key
     pub reacted_by_me: bool,
+    /// Event ID of *our* `m.reaction` for this key (needed to redact / toggle off).
+    /// `None` when we have not reacted, or the reaction event id is unknown.
+    pub my_reaction_event_id: Option<String>,
 }
 
 /// A parsed timeline event for presentation in chat views

@@ -18,6 +18,7 @@ use crate::app::MatrixusApp;
 use crate::settings::AppSettings;
 use crate::ui::async_ui::{self, UiSend};
 use crate::ui::call::open_call_window;
+use crate::ui::create_room_dialog::{self, CreateKind};
 use crate::ui::login;
 use crate::ui::settings as settings_ui;
 use crate::ui::verification;
@@ -103,6 +104,10 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
 
     // Primary menu model
     let menu = gio::Menu::new();
+    let create_section = gio::Menu::new();
+    create_section.append(Some("Create group…"), Some("win.create-group"));
+    create_section.append(Some("Create space…"), Some("win.create-space"));
+    menu.append_section(None, &create_section);
     menu.append(Some("Preferences"), Some("win.preferences"));
     menu.append(Some("Keyboard Shortcuts"), Some("win.show-help-overlay"));
     menu.append(Some("About Matrixus"), Some("win.about"));
@@ -214,15 +219,31 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
     let sidebar_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     sidebar_box.set_hexpand(true);
     sidebar_box.set_vexpand(true);
+
+    let sidebar_header_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    sidebar_header_box.set_margin_top(12);
+    sidebar_header_box.set_margin_bottom(6);
+    sidebar_header_box.set_margin_start(12);
+    sidebar_header_box.set_margin_end(8);
     let sidebar_header = gtk4::Label::builder()
         .label("Rooms")
         .css_classes(["title-4"])
-        .margin_top(12)
-        .margin_bottom(6)
-        .margin_start(12)
         .halign(gtk4::Align::Start)
+        .hexpand(true)
         .build();
-    sidebar_box.append(&sidebar_header);
+    let create_menu_button = gtk4::MenuButton::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Create group or space")
+        .css_classes(["flat"])
+        .build();
+    let create_menu = gio::Menu::new();
+    create_menu.append(Some("Create group…"), Some("win.create-group"));
+    create_menu.append(Some("Create space…"), Some("win.create-space"));
+    create_menu_button.set_menu_model(Some(&create_menu));
+    sidebar_header_box.append(&sidebar_header);
+    sidebar_header_box.append(&create_menu_button);
+
+    sidebar_box.append(&sidebar_header_box);
     sidebar_box.append(&search_entry);
     sidebar_box.append(&sidebar_scrolled);
 
@@ -708,6 +729,185 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
     let all_rooms: Arc<std::sync::Mutex<Vec<RoomSummary>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
 
+    // ── Create group / space actions (need all_rooms) ───────────────────────
+    {
+        let win = window.clone();
+        let app_for_create = app_state.clone();
+        let sidebar_list_create = sidebar_list.clone();
+        let title_label_create = title_label.clone();
+        let timeline_list_create = timeline_list.clone();
+        let composer_entry_create = composer_entry.clone();
+        let send_button_create = send_button.clone();
+        let selected_room_create = selected_room.clone();
+        let all_rooms_create = all_rooms.clone();
+        let known_create = known_event_ids.clone();
+        let encryption_badge_create = encryption_badge.clone();
+        let call_button_create = call_button.clone();
+        let voice_call_button_create = voice_call_button.clone();
+        let can_load_earlier_create = can_load_earlier.clone();
+        let search_entry_create = search_entry.clone();
+
+        let make_on_created = {
+            let app = app_for_create.clone();
+            let sidebar_list = sidebar_list_create.clone();
+            let title_label = title_label_create.clone();
+            let timeline_list = timeline_list_create.clone();
+            let composer_entry = composer_entry_create.clone();
+            let send_button = send_button_create.clone();
+            let selected_room = selected_room_create.clone();
+            let all_rooms = all_rooms_create.clone();
+            let known = known_create.clone();
+            let encryption_badge = encryption_badge_create.clone();
+            let call_button = call_button_create.clone();
+            let voice_call_button = voice_call_button_create.clone();
+            let can_load_earlier = can_load_earlier_create.clone();
+            let search_entry = search_entry_create.clone();
+            move |room_id: String| {
+                let app = app.clone();
+                let selected_room = selected_room.clone();
+                let all_rooms = all_rooms.clone();
+                let known = known.clone();
+                let can_load_earlier = can_load_earlier.clone();
+                let room_id_for_open = room_id.clone();
+                // GTK widgets are !Send — wrap before crossing into Tokio.
+                let sidebar_list = UiSend::new(sidebar_list.clone());
+                let title_label = UiSend::new(title_label.clone());
+                let timeline_list = UiSend::new(timeline_list.clone());
+                let composer_entry = UiSend::new(composer_entry.clone());
+                let send_button = UiSend::new(send_button.clone());
+                let encryption_badge = UiSend::new(encryption_badge.clone());
+                let call_button = UiSend::new(call_button.clone());
+                let voice_call_button = UiSend::new(voice_call_button.clone());
+                let search_entry = UiSend::new(search_entry.clone());
+
+                tokio::spawn(async move {
+                    let rooms_result = app.refresh_rooms().await;
+                    async_ui::on_ui(move || {
+                        let sidebar_list = sidebar_list.into_inner();
+                        let title_label = title_label.into_inner();
+                        let timeline_list = timeline_list.into_inner();
+                        let composer_entry = composer_entry.into_inner();
+                        let send_button = send_button.into_inner();
+                        let encryption_badge = encryption_badge.into_inner();
+                        let call_button = call_button.into_inner();
+                        let voice_call_button = voice_call_button.into_inner();
+                        let search_entry = search_entry.into_inner();
+
+                        if let Ok(rooms) = rooms_result {
+                            if let Ok(mut guard) = all_rooms.lock() {
+                                *guard = rooms.clone();
+                            }
+                            let query = search_entry.text().to_lowercase();
+                            let filtered: Vec<RoomSummary> = if query.is_empty() {
+                                rooms
+                            } else {
+                                rooms
+                                    .into_iter()
+                                    .filter(|room| {
+                                        room.name.to_lowercase().contains(&query)
+                                            || room.room_id.to_lowercase().contains(&query)
+                                    })
+                                    .collect()
+                            };
+                            while let Some(row) = sidebar_list.row_at_index(0) {
+                                sidebar_list.remove(&row);
+                            }
+                            populate_sidebar(
+                                &sidebar_list,
+                                &filtered,
+                                &title_label,
+                                &timeline_list,
+                                &composer_entry,
+                                &send_button,
+                                &selected_room,
+                                app.clone(),
+                                known.clone(),
+                                &encryption_badge,
+                                &call_button,
+                                &voice_call_button,
+                                can_load_earlier.clone(),
+                            );
+                        }
+
+                        if let Ok(mut sel) = selected_room.lock() {
+                            *sel = Some(room_id_for_open.clone());
+                        }
+                        title_label.set_label(&room_id_for_open);
+                        composer_entry.set_sensitive(true);
+                        send_button.set_sensitive(true);
+                        call_button.set_sensitive(true);
+                        voice_call_button.set_sensitive(true);
+
+                        let app2 = app.clone();
+                        let known2 = known.clone();
+                        let room_id2 = room_id_for_open.clone();
+                        // Re-wrap timeline for the nested Tokio task.
+                        let timeline_list2 = UiSend::new(timeline_list.clone());
+                        tokio::spawn(async move {
+                            let _ = app2.open_room(&room_id2).await;
+                            if let Ok(page) = app2.load_timeline(&room_id2, 50).await {
+                                async_ui::on_ui(move || {
+                                    let timeline_list2 = timeline_list2.into_inner();
+                                    while let Some(row) = timeline_list2.row_at_index(0) {
+                                        timeline_list2.remove(&row);
+                                    }
+                                    if let Ok(mut set) = known2.lock() {
+                                        set.clear();
+                                        for ev in &page.events {
+                                            set.insert(ev.event_id.clone());
+                                        }
+                                    }
+                                    for event in &page.events {
+                                        timeline_list2.append(&event_to_row(
+                                            event,
+                                            &app2,
+                                            &Arc::new(std::sync::Mutex::new(Some(
+                                                room_id2.clone(),
+                                            ))),
+                                        ));
+                                    }
+                                });
+                            }
+                        });
+                    });
+                });
+            }
+        };
+
+        let on_created = Rc::new(make_on_created);
+
+        let create_group = gio::SimpleAction::new("create-group", None);
+        {
+            let win = win.clone();
+            let app = app_for_create.clone();
+            let on_created = on_created.clone();
+            create_group.connect_activate(move |_, _| {
+                create_room_dialog::show_create_room_dialog(
+                    &win,
+                    app.clone(),
+                    CreateKind::Group,
+                    on_created.clone(),
+                );
+            });
+        }
+        window.add_action(&create_group);
+
+        let create_space = gio::SimpleAction::new("create-space", None);
+        {
+            let win = win.clone();
+            let app = app_for_create.clone();
+            create_space.connect_activate(move |_, _| {
+                create_room_dialog::show_create_room_dialog(
+                    &win,
+                    app.clone(),
+                    CreateKind::Space,
+                    on_created.clone(),
+                );
+            });
+        }
+        window.add_action(&create_space);
+    }
+
     // ── Initial room fetch ──────────────────────────────────────────────────
     let sidebar_list_for_fetch = sidebar_list.clone();
     let title_label_for_select = title_label.clone();
@@ -1029,13 +1229,42 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                                 &app_state,
                                 &selected_room,
                             ));
+                            // Keep the view scrolled to the latest message when we
+                            // are already at (or near) the bottom.  Always show the
+                            // new row; the list itself handles layout.
                         }
                     } else {
-                        let preview = event.content.preview_text().to_string();
-                        let sender = event.sender.clone();
-                        app_state.notifications.show_message_notification(
-                            &room_id, &sender, &preview,
-                        );
+                        // Desktop notification for messages in non-active rooms.
+                        // Skip our own messages (echoed back by sync).
+                        let own_id = app_state
+                            .client
+                            .try_lock()
+                            .ok()
+                            .and_then(|g| g.as_ref().and_then(|c| c.user_id()));
+                        let is_own = own_id
+                            .as_ref()
+                            .map(|uid| uid == &event.sender)
+                            .unwrap_or(false);
+                        if !is_own {
+                            let room_name = all_rooms
+                                .lock()
+                                .ok()
+                                .and_then(|rooms| {
+                                    rooms
+                                        .iter()
+                                        .find(|r| r.room_id == room_id)
+                                        .map(|r| r.name.clone())
+                                })
+                                .unwrap_or_else(|| room_id.clone());
+                            let sender = event
+                                .sender_display_name
+                                .clone()
+                                .unwrap_or_else(|| event.sender.clone());
+                            let preview = event.content.preview_text().to_string();
+                            app_state.notifications.show_message_notification(
+                                &room_name, &sender, &preview,
+                            );
+                        }
                     }
                 }
                 SyncEvent::VerificationChanged(state) => {
@@ -1192,7 +1421,9 @@ fn populate_sidebar(
             });
 
         let mut title = room.name.clone();
-        if room.is_encrypted {
+        if room.is_space {
+            title = format!("🗂 {title}");
+        } else if room.is_encrypted {
             title = format!("🔒 {title}");
         }
         if room.unread_notifications > 0 {
@@ -1481,25 +1712,67 @@ fn event_to_row(
             .build();
         if reaction.reacted_by_me {
             chip.add_css_class("suggested-action");
+            chip.set_tooltip_text(Some(&format!(
+                "You reacted with {} ({} total) — click to remove",
+                reaction.key, reaction.count
+            )));
+        } else {
+            chip.set_tooltip_text(Some(&format!(
+                "{} × {} — click to add yours",
+                reaction.key, reaction.count
+            )));
         }
-        chip.set_tooltip_text(Some(&format!(
-            "{} × {}",
-            reaction.key, reaction.count
-        )));
-        // Clicking an existing reaction sends another of the same key.
+        // Toggle: remove our reaction if present, otherwise send one.
+        // Keep a mutable handle so repeated clicks use the latest reaction event id.
         let key = reaction.key.clone();
         let event_id = event.event_id.clone();
+        let my_reaction_id = std::sync::Arc::new(std::sync::Mutex::new(
+            reaction.my_reaction_event_id.clone(),
+        ));
         let app = app_state.clone();
         let room_sel = selected_room.clone();
+        let chip_w = chip.clone();
         chip.connect_clicked(move |_| {
             let room_id = room_sel.lock().ok().and_then(|g| g.clone());
             let Some(room_id) = room_id else { return };
             let app = app.clone();
             let event_id = event_id.clone();
             let key = key.clone();
+            let my_id_slot = my_reaction_id.clone();
+            let my_id = my_id_slot.lock().ok().and_then(|g| g.clone());
+            let chip_ui = async_ui::UiSend::new(chip_w.clone());
             tokio::spawn(async move {
-                if let Err(e) = app.send_reaction(&room_id, &event_id, &key).await {
-                    tracing::warn!("Failed to send reaction: {e}");
+                match app
+                    .toggle_reaction(&room_id, &event_id, &key, my_id.as_deref())
+                    .await
+                {
+                    Ok(Some(new_id)) => {
+                        if let Ok(mut g) = my_id_slot.lock() {
+                            *g = Some(new_id);
+                        }
+                        // We added our reaction — highlight the chip.
+                        async_ui::on_ui(move || {
+                            let chip = chip_ui.into_inner();
+                            chip.add_css_class("suggested-action");
+                            chip.set_tooltip_text(Some(&format!(
+                                "You reacted with {key} — click to remove"
+                            )));
+                        });
+                    }
+                    Ok(None) => {
+                        if let Ok(mut g) = my_id_slot.lock() {
+                            *g = None;
+                        }
+                        // We removed our reaction — un-highlight (count may still be >0).
+                        async_ui::on_ui(move || {
+                            let chip = chip_ui.into_inner();
+                            chip.remove_css_class("suggested-action");
+                            chip.set_tooltip_text(Some(&format!(
+                                "{key} — click to add yours"
+                            )));
+                        });
+                    }
+                    Err(e) => tracing::warn!("Failed to toggle reaction: {e}"),
                 }
             });
         });
@@ -1518,13 +1791,32 @@ fn event_to_row(
     emoji_box.set_margin_end(6);
     emoji_box.set_margin_top(4);
     emoji_box.set_margin_bottom(4);
+
+    // Build a lookup of keys we already reacted with so the popover can toggle.
+    let my_keys: std::collections::HashMap<String, Option<String>> = event
+        .reactions
+        .iter()
+        .filter(|r| r.reacted_by_me)
+        .map(|r| (r.key.clone(), r.my_reaction_event_id.clone()))
+        .collect();
+
     for &emoji in QUICK_REACTIONS {
         let btn = gtk4::Button::with_label(emoji);
         btn.add_css_class("flat");
+        if my_keys.contains_key(emoji) {
+            btn.add_css_class("suggested-action");
+            btn.set_tooltip_text(Some("Click to remove your reaction"));
+        } else {
+            btn.set_tooltip_text(Some("Click to react"));
+        }
         let event_id = event.event_id.clone();
         let app = app_state.clone();
         let room_sel = selected_room.clone();
         let popover_c = popover.clone();
+        let my_id_slot = std::sync::Arc::new(std::sync::Mutex::new(
+            my_keys.get(emoji).cloned().flatten(),
+        ));
+        let btn_w = btn.clone();
         btn.connect_clicked(move |_| {
             popover_c.popdown();
             let room_id = room_sel.lock().ok().and_then(|g| g.clone());
@@ -1532,9 +1824,35 @@ fn event_to_row(
             let app = app.clone();
             let event_id = event_id.clone();
             let key = emoji.to_string();
+            let my_id_slot = my_id_slot.clone();
+            let my_id = my_id_slot.lock().ok().and_then(|g| g.clone());
+            let btn_ui = async_ui::UiSend::new(btn_w.clone());
             tokio::spawn(async move {
-                if let Err(e) = app.send_reaction(&room_id, &event_id, &key).await {
-                    tracing::warn!("Failed to send reaction: {e}");
+                match app
+                    .toggle_reaction(&room_id, &event_id, &key, my_id.as_deref())
+                    .await
+                {
+                    Ok(Some(new_id)) => {
+                        if let Ok(mut g) = my_id_slot.lock() {
+                            *g = Some(new_id);
+                        }
+                        async_ui::on_ui(move || {
+                            let btn = btn_ui.into_inner();
+                            btn.add_css_class("suggested-action");
+                            btn.set_tooltip_text(Some("Click to remove your reaction"));
+                        });
+                    }
+                    Ok(None) => {
+                        if let Ok(mut g) = my_id_slot.lock() {
+                            *g = None;
+                        }
+                        async_ui::on_ui(move || {
+                            let btn = btn_ui.into_inner();
+                            btn.remove_css_class("suggested-action");
+                            btn.set_tooltip_text(Some("Click to react"));
+                        });
+                    }
+                    Err(e) => tracing::warn!("Failed to toggle reaction: {e}"),
                 }
             });
         });

@@ -9,7 +9,7 @@ use tracing::{info, warn};
 
 use matrix_sdk::config::SyncSettings;
 
-use crate::client::MatrixClient;
+use crate::client::{map_timeline_event, MatrixClient};
 use crate::error::Result;
 use crate::crypto::VerificationState;
 use crate::room::TimelineEvent;
@@ -89,16 +89,41 @@ impl SyncService {
 
         let mut sync_settings = SyncSettings::default().timeout(Duration::from_secs(30));
         let mut was_offline = false;
+        // First successful sync populates the store; do not emit per-event
+        // TimelineUpdated (would flood notifications with historical messages).
+        // Subsequent syncs only contain events since the previous batch token.
+        let mut initial_sync_done = false;
 
         while self.running.load(Ordering::SeqCst) {
             match self.client.inner().sync_once(sync_settings.clone()).await {
                 Ok(response) => {
-                    sync_settings = sync_settings.token(response.next_batch);
+                    sync_settings = sync_settings.token(response.next_batch.clone());
 
                     if was_offline {
                         info!("Matrix connection restored");
                         let _ = self.event_sender.send(SyncEvent::ConnectionRestored);
                         was_offline = false;
+                    }
+
+                    if initial_sync_done {
+                        // Emit per-event timeline updates from this sync batch so the
+                        // UI can append messages live and show desktop notifications.
+                        // Field is `joined` (matrix-sdk 0.19 RoomUpdates), not the raw API's `join`.
+                        for (room_id, room_update) in response.rooms.joined.iter() {
+                            let rid = room_id.to_string();
+                            for raw in room_update.timeline.events.iter() {
+                                // `raw` is matrix_sdk::deserialized_responses::TimelineEvent
+                                if let Some(event) = map_timeline_event(raw) {
+                                    let _ = self.event_sender.send(SyncEvent::TimelineUpdated {
+                                        room_id: rid.clone(),
+                                        event,
+                                    });
+                                }
+                            }
+                        }
+                    } else {
+                        initial_sync_done = true;
+                        info!("Initial sync complete; live TimelineUpdated events enabled");
                     }
 
                     // Notify UI that room metadata / unread counts may have changed

@@ -9,6 +9,8 @@ pub mod window;
 #[cfg(feature = "gui")]
 pub mod async_ui;
 #[cfg(feature = "gui")]
+pub mod create_room_dialog;
+#[cfg(feature = "gui")]
 pub mod gtk_app;
 #[cfg(feature = "gui")]
 pub mod login;

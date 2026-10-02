@@ -9,14 +9,21 @@ use matrix_sdk::{
     media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings},
     room::MessagesOptions,
     ruma::{
+        api::client::room::create_room::v3::{
+            CreationContent, Request as CreateRoomRequest, RoomPreset,
+        },
         events::{
+            room::encryption::RoomEncryptionEventContent,
+            room::power_levels::RoomPowerLevelsEventContent,
+            InitialStateEvent,
             reaction::ReactionEventContent,
             relation::Annotation,
             room::message::{MessageType, RoomMessageEventContent},
             room::MediaSource,
             SyncMessageLikeEvent,
         },
-        EventId, OwnedDeviceId, OwnedMxcUri, RoomId, UInt, UserId,
+        room::RoomType,
+        EventId, Int, OwnedDeviceId, OwnedMxcUri, OwnedUserId, RoomId, UInt, UserId,
     },
     store::RoomLoadSettings,
     Client, SessionMeta,
@@ -27,7 +34,7 @@ use crate::crypto::{
     CryptoStatus, DeviceInfo, DeviceTrustLevel, RoomEncryptionInfo, SasEmoji, VerificationState,
 };
 use crate::error::{MatrixError, Result};
-use crate::room::{EventContent, ReactionSummary, RoomSummary, TimelineEvent};
+use crate::room::{CreateRoomOptions, EventContent, ReactionSummary, RoomSummary, TimelineEvent};
 use crate::session::MatrixSession;
 
 /// Main Matrix client engine managing homeserver connection and state
@@ -232,6 +239,7 @@ impl MatrixClient {
             let topic = room.topic();
             let avatar_url = room.avatar_url().map(|u| u.to_string());
             let is_direct = room.is_direct().await.unwrap_or(false);
+            let is_space = room.is_space();
             let is_encrypted = room
                 .latest_encryption_state()
                 .await
@@ -245,6 +253,7 @@ impl MatrixClient {
                 topic,
                 avatar_url,
                 is_direct,
+                is_space,
                 is_encrypted,
                 unread_notifications,
                 has_active_call: false,
@@ -253,6 +262,129 @@ impl MatrixClient {
         }
 
         summaries
+    }
+
+    /// Create a group chat room or a Matrix Space.
+    ///
+    /// Groups default to private + encrypted. Spaces set `type: m.space` and
+    /// raise `events_default` so the space room is not used as a free-form chat.
+    pub async fn create_room(&self, opts: CreateRoomOptions) -> Result<String> {
+        let name = opts.name.trim();
+        if name.is_empty() {
+            return Err(MatrixError::Other("Room name is required".into()));
+        }
+
+        let mut invite: Vec<OwnedUserId> = Vec::new();
+        for raw in &opts.invite {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let uid = <&UserId>::try_from(trimmed).map_err(|e| {
+                MatrixError::Other(format!("Invalid Matrix user ID '{trimmed}': {e}"))
+            })?;
+            invite.push(uid.to_owned());
+        }
+
+        let mut request = CreateRoomRequest::new();
+        request.name = Some(name.to_string());
+        if let Some(topic) = opts.topic.filter(|t| !t.trim().is_empty()) {
+            request.topic = Some(topic);
+        }
+        request.invite = invite;
+        request.is_direct = false;
+
+        if opts.is_public {
+            request.visibility = matrix_sdk::ruma::api::client::room::Visibility::Public;
+            request.preset = Some(RoomPreset::PublicChat);
+        } else {
+            request.visibility = matrix_sdk::ruma::api::client::room::Visibility::Private;
+            request.preset = Some(RoomPreset::PrivateChat);
+        }
+
+        let mut initial_state = Vec::new();
+
+        if opts.encrypted {
+            let encryption = InitialStateEvent::with_empty_state_key(
+                RoomEncryptionEventContent::with_recommended_defaults(),
+            );
+            initial_state.push(encryption.to_raw_any());
+        }
+
+        if opts.is_space {
+            let mut creation = CreationContent::new();
+            creation.room_type = Some(RoomType::Space);
+            request.creation_content = Some(
+                matrix_sdk::ruma::serde::Raw::new(&creation).map_err(|e| {
+                    MatrixError::Other(format!("Failed to serialize space creation content: {e}"))
+                })?,
+            );
+
+            // Discourage messaging in the space room itself by raising events_default.
+            let mut power_levels = RoomPowerLevelsEventContent::new(
+                &matrix_sdk::ruma::room_version_rules::AuthorizationRules::V1,
+            );
+            power_levels.events_default = Int::from(100);
+            let pl_event = InitialStateEvent::with_empty_state_key(power_levels);
+            initial_state.push(pl_event.to_raw_any());
+        }
+
+        request.initial_state = initial_state;
+
+        let kind = if opts.is_space { "space" } else { "group" };
+        info!(
+            "Creating {kind} “{name}” (public={}, encrypted={}, invites={})",
+            opts.is_public,
+            opts.encrypted,
+            request.invite.len()
+        );
+
+        let room = self
+            .inner
+            .create_room(request)
+            .await
+            .map_err(|e| MatrixError::Other(format!("create_room failed: {e}")))?;
+
+        let room_id = room.room_id().to_string();
+        info!("Created {kind} {room_id}");
+        Ok(room_id)
+    }
+
+    /// Convenience: create an encrypted private group chat.
+    pub async fn create_group(
+        &self,
+        name: &str,
+        topic: Option<&str>,
+        invite: &[String],
+    ) -> Result<String> {
+        self.create_room(CreateRoomOptions {
+            name: name.to_string(),
+            topic: topic.map(|s| s.to_string()),
+            invite: invite.to_vec(),
+            encrypted: true,
+            is_public: false,
+            is_space: false,
+        })
+        .await
+    }
+
+    /// Convenience: create a Matrix Space.
+    pub async fn create_space(
+        &self,
+        name: &str,
+        topic: Option<&str>,
+        invite: &[String],
+        is_public: bool,
+    ) -> Result<String> {
+        self.create_room(CreateRoomOptions {
+            name: name.to_string(),
+            topic: topic.map(|s| s.to_string()),
+            invite: invite.to_vec(),
+            encrypted: false,
+            is_public,
+            is_space: true,
+        })
+        .await
     }
 
     /// Fetch a page of timeline events for a room (oldest first).
@@ -289,20 +421,22 @@ impl MatrixClient {
             .map_err(|e| MatrixError::Other(format!("Failed to fetch messages: {e}")))?;
 
         let mut events = Vec::new();
-        // Collect reactions found in this page: target_event_id -> (key -> count/senders)
+        // Collect reactions found in this page:
+        // target_event_id -> (key -> (count, reacted_by_me, my_reaction_event_id))
         let mut reaction_map: std::collections::HashMap<
             String,
-            std::collections::HashMap<String, (u32, bool)>,
+            std::collections::HashMap<String, (u32, bool, Option<String>)>,
         > = std::collections::HashMap::new();
         let own_user = self.inner.user_id().map(|u| u.to_string());
 
         for sdk_event in &response.chunk {
-            if let Some((target, key, sender)) = map_reaction_event(sdk_event) {
+            if let Some((target, key, sender, reaction_event_id)) = map_reaction_event(sdk_event) {
                 let entry = reaction_map.entry(target).or_default();
-                let (count, me) = entry.entry(key).or_insert((0, false));
+                let (count, me, my_id) = entry.entry(key).or_insert((0, false, None));
                 *count += 1;
                 if own_user.as_ref() == Some(&sender) {
                     *me = true;
+                    *my_id = Some(reaction_event_id);
                 }
                 continue;
             }
@@ -322,10 +456,11 @@ impl MatrixClient {
             if let Some(keys) = reaction_map.get(&ev.event_id) {
                 let mut reactions: Vec<ReactionSummary> = keys
                     .iter()
-                    .map(|(key, (count, me))| ReactionSummary {
+                    .map(|(key, (count, me, my_id))| ReactionSummary {
                         key: key.clone(),
                         count: *count,
                         reacted_by_me: *me,
+                        my_reaction_event_id: my_id.clone(),
                     })
                     .collect();
                 reactions.sort_by(|a, b| a.key.cmp(&b.key));
@@ -371,6 +506,52 @@ impl MatrixClient {
         ));
         let response = room.send(content).await?;
         Ok(response.response.event_id.to_string())
+    }
+
+    /// Remove (redact) a reaction event we previously sent.
+    ///
+    /// `reaction_event_id` is the event ID of the `m.reaction` itself, not the
+    /// target message. Call this when the user toggles off a reaction they own.
+    pub async fn remove_reaction(
+        &self,
+        room_id: &str,
+        reaction_event_id: &str,
+    ) -> Result<()> {
+        let room_id = <&RoomId>::try_from(room_id)
+            .map_err(|e| MatrixError::RoomNotFound(format!("Invalid room ID: {e}")))?;
+        let reaction_event_id = <&EventId>::try_from(reaction_event_id)
+            .map_err(|e| MatrixError::Other(format!("Invalid reaction event ID: {e}")))?;
+
+        let room = self
+            .inner
+            .get_room(room_id)
+            .ok_or_else(|| MatrixError::RoomNotFound(format!("Room not found: {room_id}")))?;
+
+        room.redact(reaction_event_id, None, None)
+            .await
+            .map_err(|e| MatrixError::Other(format!("Failed to redact reaction: {e}")))?;
+        Ok(())
+    }
+
+    /// Toggle an emoji reaction: send if we have not reacted with this key,
+    /// redact our existing reaction event if we have.
+    ///
+    /// Returns `Ok(Some(new_reaction_event_id))` when a reaction was added,
+    /// `Ok(None)` when it was removed.
+    pub async fn toggle_reaction(
+        &self,
+        room_id: &str,
+        target_event_id: &str,
+        key: &str,
+        my_reaction_event_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        if let Some(rid) = my_reaction_event_id {
+            self.remove_reaction(room_id, rid).await?;
+            Ok(None)
+        } else {
+            let id = self.send_reaction(room_id, target_event_id, key).await?;
+            Ok(Some(id))
+        }
     }
 
     /// Download media bytes for an MXC URI (avatars, thumbnails, etc.).
@@ -946,7 +1127,7 @@ impl MatrixClient {
 }
 
 /// Convert an SDK `deserialized_responses::TimelineEvent` into our presentation type.
-fn map_timeline_event(
+pub(crate) fn map_timeline_event(
     sdk_event: &matrix_sdk::deserialized_responses::TimelineEvent,
 ) -> Option<TimelineEvent> {
     use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
@@ -1071,10 +1252,10 @@ fn map_timeline_event(
 
 /// Extract a reaction annotation from a timeline event, if it is `m.reaction`.
 ///
-/// Returns `(target_event_id, reaction_key, sender_user_id)`.
+/// Returns `(target_event_id, reaction_key, sender_user_id, reaction_event_id)`.
 fn map_reaction_event(
     sdk_event: &matrix_sdk::deserialized_responses::TimelineEvent,
-) -> Option<(String, String, String)> {
+) -> Option<(String, String, String, String)> {
     use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
 
     let any: AnySyncTimelineEvent = sdk_event.raw().deserialize().ok()?;
@@ -1085,6 +1266,7 @@ fn map_reaction_event(
             ev.content.relates_to.event_id.to_string(),
             ev.content.relates_to.key.clone(),
             ev.sender.to_string(),
+            ev.event_id.to_string(),
         )),
         _ => None,
     }
