@@ -221,6 +221,46 @@ impl MatrixusApp {
         Ok(rooms)
     }
 
+    /// Create an encrypted private group chat. Returns the new room ID.
+    pub async fn create_group(
+        &self,
+        name: &str,
+        topic: Option<&str>,
+        invite: &[String],
+    ) -> anyhow::Result<String> {
+        let client_guard = self.client.lock().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let room_id = client.create_group(name, topic, invite).await?;
+        drop(client_guard);
+        info!("Created group {room_id}");
+        // Refresh local room list so the sidebar picks it up immediately.
+        let _ = self.refresh_rooms().await;
+        Ok(room_id)
+    }
+
+    /// Create a Matrix Space. Returns the new room ID.
+    pub async fn create_space(
+        &self,
+        name: &str,
+        topic: Option<&str>,
+        invite: &[String],
+        is_public: bool,
+    ) -> anyhow::Result<String> {
+        let client_guard = self.client.lock().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let room_id = client
+            .create_space(name, topic, invite, is_public)
+            .await?;
+        drop(client_guard);
+        info!("Created space {room_id}");
+        let _ = self.refresh_rooms().await;
+        Ok(room_id)
+    }
+
     /// Record that the user opened a room (updates presentation state only).
     pub async fn open_room(&self, room_id: &str) {
         let mut state = self.state.lock().await;
@@ -356,6 +396,45 @@ impl MatrixusApp {
         let reaction_id = client.send_reaction(room_id, event_id, key).await?;
         info!("Sent reaction {key} on {event_id} in {room_id}: {reaction_id}");
         Ok(reaction_id)
+    }
+
+    /// Remove a reaction we previously sent (redacts the `m.reaction` event).
+    pub async fn remove_reaction(
+        &self,
+        room_id: &str,
+        reaction_event_id: &str,
+    ) -> anyhow::Result<()> {
+        let client_guard = self.client.lock().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        client.remove_reaction(room_id, reaction_event_id).await?;
+        info!("Removed reaction {reaction_event_id} in {room_id}");
+        Ok(())
+    }
+
+    /// Toggle a reaction: add if not present, remove if we already reacted with this key.
+    ///
+    /// Returns `Ok(Some(new_event_id))` when added, `Ok(None)` when removed.
+    pub async fn toggle_reaction(
+        &self,
+        room_id: &str,
+        target_event_id: &str,
+        key: &str,
+        my_reaction_event_id: Option<&str>,
+    ) -> anyhow::Result<Option<String>> {
+        let client_guard = self.client.lock().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let result = client
+            .toggle_reaction(room_id, target_event_id, key, my_reaction_event_id)
+            .await?;
+        match &result {
+            Some(id) => info!("Toggled reaction on: {key} -> {id}"),
+            None => info!("Toggled reaction off: {key}"),
+        }
+        Ok(result)
     }
 
     /// Download avatar / media bytes for an MXC URI.
