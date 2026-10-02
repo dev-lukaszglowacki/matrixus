@@ -9,27 +9,6 @@ Built with **Rust**, **GTK4 / Libadwaita**, and the official [`matrix-rust-sdk`]
 
 ---
 
-## Status
-
-GUI development phases **1–7 are complete**.
-
-| Area | Status |
-|------|--------|
-| Login / session restore | ✅ |
-| Room list (search, unread, 🔒) | ✅ |
-| Timeline + send messages | ✅ |
-| Live sync + offline banner | ✅ |
-| Encryption / SAS verification UI | ✅ |
-| MatrixRTC calls (Element Call) | ✅ |
-| Settings, shortcuts, theme, notifications | ✅ |
-| Flatpak / AppStream packaging metadata | ✅ |
-
-Optional follow-ups: StatusNotifierItem tray applet, broader UI tests / CI packaging.
-
-See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for the detailed roadmap.
-
----
-
 ## Features
 
 ### Core (`matrix-core`)
@@ -136,7 +115,3 @@ flatpak-builder --user --install --force-clean build build-aux/flatpak/com.matri
 | `Enter` | Send message (when enabled in settings) |
 
 ---
-
-## License
-
-Apache-2.0
