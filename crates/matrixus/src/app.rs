@@ -229,28 +229,105 @@ impl MatrixusApp {
     }
 
     /// Load recent timeline events for a room and store them in presentation state.
+    ///
+    /// Starts at the end of the timeline (most recent). Returns the page of
+    /// events (oldest first) plus the token needed to load older history.
     pub async fn load_timeline(
         &self,
         room_id: &str,
         limit: u32,
-    ) -> anyhow::Result<Vec<matrix_core::TimelineEvent>> {
+    ) -> anyhow::Result<matrix_core::TimelinePage> {
         let client_guard = self.client.lock().await;
         let client = client_guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
 
-        let events = client.fetch_timeline(room_id, limit).await?;
+        let page = client.fetch_timeline(room_id, limit, None).await?;
 
         drop(client_guard);
         {
             let mut state = self.state.lock().await;
+            let reached_start = page.end_token.is_none();
             state.timeline = Some(crate::ui::TimelineState {
                 room_id: room_id.to_string(),
-                events: events.clone(),
+                events: page.events.clone(),
+                prev_batch: page.end_token.clone(),
+                reached_start,
             });
         }
 
-        Ok(events)
+        Ok(page)
+    }
+
+    /// Load older messages before the currently displayed history.
+    ///
+    /// Uses the stored `prev_batch` token. Returns an empty page when there is
+    /// no more history or when a token is not available yet. When a request is
+    /// made and the server returns no further `end` token, `reached_start` is set.
+    /// Returns `(page, fetched)` where `fetched` is true only when a
+    /// `/messages` request was actually issued.
+    pub async fn load_earlier_messages(
+        &self,
+        room_id: &str,
+        limit: u32,
+    ) -> anyhow::Result<(matrix_core::TimelinePage, bool)> {
+        let from_token = {
+            let state = self.state.lock().await;
+            match state.timeline.as_ref() {
+                Some(tl) if tl.room_id == room_id => {
+                    if tl.reached_start {
+                        return Ok((
+                            matrix_core::TimelinePage {
+                                events: Vec::new(),
+                                end_token: None,
+                            },
+                            false,
+                        ));
+                    }
+                    tl.prev_batch.clone()
+                }
+                _ => None,
+            }
+        };
+
+        let Some(from) = from_token else {
+            // No token: initial load still pending, or start already reached.
+            return Ok((
+                matrix_core::TimelinePage {
+                    events: Vec::new(),
+                    end_token: None,
+                },
+                false,
+            ));
+        };
+
+        let client_guard = self.client.lock().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+
+        let page = client
+            .fetch_timeline(room_id, limit, Some(&from))
+            .await?;
+
+        drop(client_guard);
+        {
+            let mut state = self.state.lock().await;
+            if let Some(tl) = state.timeline.as_mut() {
+                if tl.room_id == room_id {
+                    // Prepend older events (page is already oldest-first).
+                    let mut combined = page.events.clone();
+                    combined.append(&mut tl.events);
+                    tl.events = combined;
+                    tl.prev_batch = page.end_token.clone();
+                    if page.end_token.is_none() {
+                        tl.reached_start = true;
+                    }
+                }
+            }
+        }
+
+        Ok((page, true))
     }
 
     /// Send a plain-text message to the given room.

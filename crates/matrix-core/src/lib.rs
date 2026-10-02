@@ -13,6 +13,6 @@ pub use crypto::{
     VerificationState,
 };
 pub use error::{MatrixError, Result};
-pub use room::{EventContent, RoomSummary, TimelineEvent};
+pub use room::{EventContent, RoomSummary, TimelineEvent, TimelinePage};
 pub use session::{FileSessionStore, MatrixSession, SessionStore};
 pub use sync::{SyncEvent, SyncService};

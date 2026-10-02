@@ -252,14 +252,20 @@ impl MatrixClient {
         summaries
     }
 
-    /// Fetch recent timeline events for a room (newest last).
+    /// Fetch a page of timeline events for a room (oldest first).
     ///
-    /// Uses `/messages` with backward pagination from the end of the timeline.
+    /// Uses `/messages` with backward pagination. When `from` is `None`,
+    /// pagination starts at the end of the accessible timeline (most recent).
+    /// When `from` is set (previous page's `end_token`), older events are loaded.
+    ///
+    /// `end_token` in the result is the token for the next older page, or `None`
+    /// when the start of history has been reached.
     pub async fn fetch_timeline(
         &self,
         room_id: &str,
         limit: u32,
-    ) -> Result<Vec<TimelineEvent>> {
+        from: Option<&str>,
+    ) -> Result<crate::room::TimelinePage> {
         let room_id_parsed = <&RoomId>::try_from(room_id)
             .map_err(|e| MatrixError::RoomNotFound(format!("Invalid room ID: {e}")))?;
 
@@ -267,10 +273,13 @@ impl MatrixClient {
             MatrixError::RoomNotFound(format!("Room not found: {room_id}"))
         })?;
 
-        let mut options = MessagesOptions::backward();
+        let mut options = MessagesOptions::backward().from(from);
         options.limit = limit.into();
 
-        info!("Fetching up to {limit} messages for {room_id}");
+        info!(
+            "Fetching up to {limit} messages for {room_id} (from={})",
+            from.unwrap_or("<end>")
+        );
         let response = room
             .messages(options)
             .await
@@ -288,8 +297,13 @@ impl MatrixClient {
 
         // `/messages` backward returns newest-first; reverse so oldest is first.
         events.reverse();
-        info!("Mapped {} timeline event(s) for {room_id}", events.len());
-        Ok(events)
+        let end_token = response.end;
+        info!(
+            "Mapped {} timeline event(s) for {room_id}; end_token={}",
+            events.len(),
+            end_token.as_deref().unwrap_or("<none>")
+        );
+        Ok(crate::room::TimelinePage { events, end_token })
     }
 
     /// Send a plain text message to a room

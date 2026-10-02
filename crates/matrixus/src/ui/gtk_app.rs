@@ -2,6 +2,7 @@
 //!
 //! Compiled only when the `gui` feature is enabled.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gtk4::gio;
@@ -213,7 +214,6 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
     let sidebar_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     sidebar_box.set_hexpand(true);
     sidebar_box.set_vexpand(true);
-
     let sidebar_header = gtk4::Label::builder()
         .label("Rooms")
         .css_classes(["title-4"])
@@ -252,10 +252,15 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
     let timeline_scrolled = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .vscrollbar_policy(gtk4::PolicyType::Automatic)
+        .kinetic_scrolling(true)
+        .overlay_scrolling(true)
         .hexpand(true)
         .vexpand(true)
+        .min_content_height(200)
         .child(&timeline_list)
         .build();
+    // Ensure the list grows with content so the ScrolledWindow can scroll.
+    timeline_list.set_valign(gtk4::Align::Start);
 
     // ── Composer ────────────────────────────────────────────────────────────
     let composer_entry = gtk4::Entry::builder()
@@ -332,6 +337,159 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
     let known_event_ids: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
         Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
+    // Back-pagination state shared with room-select handler and scroll handlers.
+    let loading_earlier: Arc<std::sync::Mutex<bool>> =
+        Arc::new(std::sync::Mutex::new(false));
+    // Whether the current room still has older history to fetch.
+    let can_load_earlier: Arc<std::sync::Mutex<bool>> =
+        Arc::new(std::sync::Mutex::new(false));
+
+    let request_earlier = {
+        let timeline_list_scroll = timeline_list.clone();
+        let selected_room_scroll = selected_room.clone();
+        let app_state_scroll = app_state.clone();
+        let known_scroll = known_event_ids.clone();
+        let loading_earlier = loading_earlier.clone();
+        let can_load_earlier = can_load_earlier.clone();
+        let timeline_scrolled_scroll = timeline_scrolled.clone();
+
+        Rc::new(move || {
+            if loading_earlier.lock().map(|g| *g).unwrap_or(true) {
+                return;
+            }
+            if !can_load_earlier.lock().map(|g| *g).unwrap_or(false) {
+                return;
+            }
+            let room_id = match selected_room_scroll.lock() {
+                Ok(g) => g.clone(),
+                Err(_) => None,
+            };
+            let Some(room_id) = room_id else {
+                return;
+            };
+
+            if let Ok(mut g) = loading_earlier.lock() {
+                *g = true;
+            }
+
+            // Remove a temporary loading header if present.
+            while let Some(row) = timeline_list_scroll.row_at_index(0) {
+                if row.widget_name() == "earlier-loading" {
+                    timeline_list_scroll.remove(&row);
+                } else {
+                    break;
+                }
+            }
+
+            let adj = timeline_scrolled_scroll.vadjustment();
+            let old_upper = adj.upper();
+            let old_value = adj.value();
+
+            let app = app_state_scroll.clone();
+            let timeline_list = UiSend::new(timeline_list_scroll.clone());
+            let known = known_scroll.clone();
+            let loading_earlier = loading_earlier.clone();
+            let can_load_earlier = can_load_earlier.clone();
+            let adj_send = UiSend::new(adj);
+
+            let loading_row = {
+                let label = gtk4::Label::builder()
+                    .label("Loading earlier messages…")
+                    .css_classes(["dim-label"])
+                    .margin_top(8)
+                    .margin_bottom(8)
+                    .halign(gtk4::Align::Center)
+                    .build();
+                let row = gtk4::ListBoxRow::new();
+                row.set_child(Some(&label));
+                row.set_activatable(false);
+                row.set_selectable(false);
+                row.set_widget_name("earlier-loading");
+                timeline_list_scroll.prepend(&row);
+                row
+            };
+            let loading_row = UiSend::new(loading_row);
+
+            tracing::info!("Back-paginating earlier messages for {room_id}");
+            tokio::spawn(async move {
+                let result = app.load_earlier_messages(&room_id, 50).await;
+                async_ui::on_ui(move || {
+                    let timeline_list = timeline_list.into_inner();
+                    let loading_row = loading_row.into_inner();
+                    let adj = adj_send.into_inner();
+                    timeline_list.remove(&loading_row);
+
+                    let mut still_more;
+                    match result {
+                        Ok((page, fetched)) => {
+                            tracing::info!(
+                                "Earlier page: {} event(s), fetched={fetched}, end_token={}",
+                                page.events.len(),
+                                page.end_token.as_deref().unwrap_or("<none>")
+                            );
+                            still_more = page.end_token.is_some();
+                            if !page.events.is_empty() {
+                                if let Ok(mut set) = known.lock() {
+                                    for ev in &page.events {
+                                        set.insert(ev.event_id.clone());
+                                    }
+                                }
+                                for event in page.events.iter().rev() {
+                                    timeline_list.prepend(&event_to_row(event));
+                                }
+                                let adj2 = adj.clone();
+                                glib::idle_add_local_once(move || {
+                                    let new_upper = adj2.upper();
+                                    let delta = new_upper - old_upper;
+                                    if delta > 0.0 {
+                                        adj2.set_value(old_value + delta);
+                                    }
+                                });
+                            } else if fetched && page.end_token.is_none() {
+                                still_more = false;
+                            } else if !fetched {
+                                still_more = true;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to load earlier messages: {e}");
+                            still_more = true; // allow retry
+                        }
+                    }
+
+                    if let Ok(mut g) = can_load_earlier.lock() {
+                        *g = still_more;
+                    }
+
+                    if let Ok(mut g) = loading_earlier.lock() {
+                        *g = false;
+                    }
+                });
+            });
+        })
+    };
+
+    // Scroll to top → load earlier.
+    {
+        let request_earlier = request_earlier.clone();
+        timeline_scrolled.connect_edge_reached(move |_scrolled, pos| {
+            if pos == gtk4::PositionType::Top {
+                tracing::debug!("Timeline edge reached: Top");
+                request_earlier();
+            }
+        });
+    }
+    {
+        let request_earlier = request_earlier.clone();
+        let adj = timeline_scrolled.vadjustment();
+        adj.connect_value_changed(move |adj| {
+            // At top of scroll range (works even before content overflows).
+            if adj.value() <= 32.0 {
+                request_earlier();
+            }
+        });
+    }
+
     // Send message via network (optimistic UI + real send)
     let timeline_for_send = timeline_list.clone();
     let composer_for_send = composer_entry.clone();
@@ -357,6 +515,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
         let optimistic = adw::ActionRow::builder()
             .title("You")
             .subtitle(&text)
+            .use_markup(false)
             .css_classes(["success"])
             .build();
         timeline_for_send.append(&optimistic);
@@ -389,6 +548,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                         let err_row = adw::ActionRow::builder()
                             .title("Failed to send")
                             .subtitle(&format!("{text_for_err} — {e}"))
+                            .use_markup(false)
                             .css_classes(["error"])
                             .build();
                         timeline.append(&err_row);
@@ -556,6 +716,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
     let encryption_badge_for_fetch = encryption_badge.clone();
     let call_button_for_fetch = call_button.clone();
     let voice_call_button_for_fetch = voice_call_button.clone();
+    let can_load_earlier_for_fetch = can_load_earlier.clone();
 
     let ui_fetch = UiSend::new((
         sidebar_list_for_fetch,
@@ -571,6 +732,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
         voice_call_button_for_fetch,
         search_entry_for_filter,
         app_state_for_select.clone(),
+        can_load_earlier_for_fetch,
     ));
 
     tokio::spawn(async move {
@@ -594,6 +756,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                 voice_call_button_for_fetch,
                 search_entry_for_filter,
                 app_state_for_select,
+                can_load_earlier_for_fetch,
             ) = ui_fetch.into_inner();
 
             // Clear loading placeholder
@@ -619,6 +782,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                         &encryption_badge_for_fetch,
                         &call_button_for_fetch,
                         &voice_call_button_for_fetch,
+                        can_load_earlier_for_fetch.clone(),
                     );
 
                     // Wire search filter
@@ -634,6 +798,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                     let enc_badge = encryption_badge_for_fetch.clone();
                     let call_btn = call_button_for_fetch.clone();
                     let voice_btn = voice_call_button_for_fetch.clone();
+                    let can_load = can_load_earlier_for_fetch.clone();
                     search_entry_for_filter.connect_search_changed(move |entry| {
                         let query = entry.text().to_lowercase();
                         let filtered: Vec<RoomSummary> = rooms_ref
@@ -665,6 +830,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                             &enc_badge,
                             &call_btn,
                             &voice_btn,
+                            can_load.clone(),
                         );
                     });
                 }
@@ -728,6 +894,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                     let encryption_badge = encryption_badge.clone();
                     let call_button = call_button.clone();
                     let voice_call_button = voice_call_button.clone();
+                    let can_load_earlier = can_load_earlier.clone();
 
                     let ui = UiSend::new((
                         sidebar_list,
@@ -743,21 +910,16 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                         call_button,
                         voice_call_button,
                         app.clone(),
+                        can_load_earlier,
                     ));
 
                     tokio::spawn(async move {
                         let rooms_result = app.refresh_rooms().await;
-                        let new_events = if let Some(ref rid) = selected_id {
-                            match app.load_timeline(rid, 20).await {
-                                Ok(events) => Some((rid.clone(), events)),
-                                Err(e) => {
-                                    tracing::warn!("Live timeline refresh failed: {e}");
-                                    None
-                                }
-                            }
-                        } else {
-                            None
-                        };
+                        // Do not re-fetch the whole timeline here — that would
+                        // discard earlier pages loaded by back-pagination.
+                        // New events arrive via TimelineUpdated.
+                        let _ = selected_id;
+                        let new_events: Option<(String, Vec<matrix_core::TimelineEvent>)> = None;
 
                         async_ui::on_ui(move || {
                             let (
@@ -774,6 +936,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                                 call_button,
                                 voice_call_button,
                                 app_state,
+                                can_load_earlier,
                             ) = ui.into_inner();
 
                             if let Ok(rooms) = rooms_result {
@@ -808,6 +971,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                                     &encryption_badge,
                                     &call_button,
                                     &voice_call_button,
+                                    can_load_earlier,
                                 );
                             }
 
@@ -987,6 +1151,7 @@ fn populate_sidebar(
     encryption_badge: &gtk4::Label,
     call_button: &gtk4::Button,
     voice_call_button: &gtk4::Button,
+    can_load_earlier: Arc<std::sync::Mutex<bool>>,
 ) {
     if rooms.is_empty() {
         let empty = adw::ActionRow::builder()
@@ -1023,6 +1188,7 @@ fn populate_sidebar(
         let row = adw::ActionRow::builder()
             .title(&title)
             .subtitle(&preview)
+            .use_markup(false)
             .activatable(true)
             .build();
 
@@ -1039,6 +1205,7 @@ fn populate_sidebar(
         let encryption_badge = encryption_badge.clone();
         let call_button = call_button.clone();
         let voice_call_button = voice_call_button.clone();
+        let can_load_earlier = can_load_earlier.clone();
 
         row.connect_activated(move |_row| {
             info!("Selected room: {room_name} ({room_id})");
@@ -1087,6 +1254,12 @@ fn populate_sidebar(
             let room_id_tl = room_id.clone();
             let timeline_list = UiSend::new(timeline_list.clone());
             let known = known.clone();
+            let can_load_earlier = can_load_earlier.clone();
+
+            // Reset pagination flag until the first page returns.
+            if let Ok(mut g) = can_load_earlier.lock() {
+                *g = false;
+            }
 
             tokio::spawn(async move {
                 app_state.open_room(&room_id_open).await;
@@ -1099,7 +1272,9 @@ fn populate_sidebar(
                     }
 
                     match result {
-                        Ok(events) => {
+                        Ok(page) => {
+                            let has_more = page.end_token.is_some();
+                            let events = page.events;
                             if events.is_empty() {
                                 let empty = gtk4::Label::builder()
                                     .label("No messages yet — say hello!")
@@ -1112,6 +1287,9 @@ fn populate_sidebar(
                                 row.set_activatable(false);
                                 row.set_selectable(false);
                                 timeline_list.append(&row);
+                                if let Ok(mut g) = can_load_earlier.lock() {
+                                    *g = has_more;
+                                }
                             } else {
                                 if let Ok(mut set) = known.lock() {
                                     for ev in &events {
@@ -1120,6 +1298,29 @@ fn populate_sidebar(
                                 }
                                 for event in &events {
                                     timeline_list.append(&event_to_row(event));
+                                }
+                                // Scroll to newest, then enable the "load earlier" control.
+                                let can_load_earlier = can_load_earlier.clone();
+                                if let Some(scrolled) = timeline_list
+                                    .parent()
+                                    .and_then(|p| p.downcast::<gtk4::Viewport>().ok())
+                                    .and_then(|v| v.parent())
+                                    .and_then(|p| p.downcast::<gtk4::ScrolledWindow>().ok())
+                                    .or_else(|| {
+                                        timeline_list
+                                            .parent()
+                                            .and_then(|p| p.downcast::<gtk4::ScrolledWindow>().ok())
+                                    })
+                                {
+                                    let adj = scrolled.vadjustment();
+                                    glib::idle_add_local_once(move || {
+                                        adj.set_value(adj.upper() - adj.page_size());
+                                        if let Ok(mut g) = can_load_earlier.lock() {
+                                            *g = has_more;
+                                        }
+                                    });
+                                } else if let Ok(mut g) = can_load_earlier.lock() {
+                                    *g = has_more;
                                 }
                             }
                         }
@@ -1171,10 +1372,14 @@ fn event_to_row(event: &matrix_core::TimelineEvent) -> adw::ActionRow {
         EventContent::Redacted => "🗑️ Message removed".into(),
     };
 
-    adw::ActionRow::builder()
+    // Plain text: ActionRow title/subtitle are Pango markup by default, which
+    // warns on bare `&` / `<` in message bodies.
+    let row = adw::ActionRow::builder()
         .title(sender_short)
         .subtitle(&body)
-        .build()
+        .use_markup(false)
+        .build();
+    row
 }
 
 /// Remove the dim-label placeholder row if present at index 0.

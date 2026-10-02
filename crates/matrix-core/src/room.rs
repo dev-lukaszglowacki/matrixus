@@ -40,6 +40,15 @@ pub struct TimelineEvent {
     pub reply_to: Option<String>,
 }
 
+/// One page of room history from `/messages` (oldest first).
+#[derive(Debug, Clone)]
+pub struct TimelinePage {
+    pub events: Vec<TimelineEvent>,
+    /// Token to request older events (`MessagesOptions::from`). `None` means
+    /// the start of the accessible timeline has been reached.
+    pub end_token: Option<String>,
+}
+
 /// Types of timeline content supported by the client
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EventContent {
