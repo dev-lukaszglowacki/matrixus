@@ -342,6 +342,35 @@ impl MatrixusApp {
         Ok(event_id)
     }
 
+    /// React to a message with an emoji key (sends `m.reaction`).
+    pub async fn send_reaction(
+        &self,
+        room_id: &str,
+        event_id: &str,
+        key: &str,
+    ) -> anyhow::Result<String> {
+        let client_guard = self.client.lock().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let reaction_id = client.send_reaction(room_id, event_id, key).await?;
+        info!("Sent reaction {key} on {event_id} in {room_id}: {reaction_id}");
+        Ok(reaction_id)
+    }
+
+    /// Download avatar / media bytes for an MXC URI.
+    pub async fn download_media(
+        &self,
+        mxc_uri: &str,
+        thumbnail: bool,
+    ) -> anyhow::Result<Vec<u8>> {
+        let client_guard = self.client.lock().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        Ok(client.download_media(mxc_uri, thumbnail).await?)
+    }
+
     /// Initiate an outgoing call in a room. Returns a controller ready for the call window.
     pub async fn start_call(
         &self,

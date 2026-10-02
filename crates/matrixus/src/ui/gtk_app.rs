@@ -386,6 +386,8 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
             let old_value = adj.value();
 
             let app = app_state_scroll.clone();
+            let app_for_rows = app.clone();
+            let room_sel_for_rows = selected_room_scroll.clone();
             let timeline_list = UiSend::new(timeline_list_scroll.clone());
             let known = known_scroll.clone();
             let loading_earlier = loading_earlier.clone();
@@ -435,7 +437,11 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                                     }
                                 }
                                 for event in page.events.iter().rev() {
-                                    timeline_list.prepend(&event_to_row(event));
+                                    timeline_list.prepend(&event_to_row(
+                                        event,
+                                        &app_for_rows,
+                                        &room_sel_for_rows,
+                                    ));
                                 }
                                 let adj2 = adj.clone();
                                 glib::idle_add_local_once(move || {
@@ -966,7 +972,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                                     &composer_entry,
                                     &send_button,
                                     &selected_room,
-                                    app_state,
+                                    app_state.clone(),
                                     known.clone(),
                                     &encryption_badge,
                                     &call_button,
@@ -993,7 +999,11 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                                                 set.insert(ev.event_id.clone());
                                             }
                                             clear_timeline_placeholder(&timeline_list);
-                                            timeline_list.append(&event_to_row(&ev));
+                                            timeline_list.append(&event_to_row(
+                                                &ev,
+                                                &app_state,
+                                                &selected_room,
+                                            ));
                                         }
                                     }
                                 }
@@ -1014,7 +1024,11 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                                 set.insert(event.event_id.clone());
                             }
                             clear_timeline_placeholder(&timeline_list);
-                            timeline_list.append(&event_to_row(&event));
+                            timeline_list.append(&event_to_row(
+                                &event,
+                                &app_state,
+                                &selected_room,
+                            ));
                         }
                     } else {
                         let preview = event.content.preview_text().to_string();
@@ -1250,6 +1264,7 @@ fn populate_sidebar(
             composer_entry.grab_focus();
 
             let app_state = app_state.clone();
+            let room_sel_for_rows = selected_room.clone();
             let room_id_open = room_id.clone();
             let room_id_tl = room_id.clone();
             let timeline_list = UiSend::new(timeline_list.clone());
@@ -1297,7 +1312,11 @@ fn populate_sidebar(
                                     }
                                 }
                                 for event in &events {
-                                    timeline_list.append(&event_to_row(event));
+                                    timeline_list.append(&event_to_row(
+                                        event,
+                                        &app_state,
+                                        &room_sel_for_rows,
+                                    ));
                                 }
                                 // Scroll to newest, then enable the "load earlier" control.
                                 let can_load_earlier = can_load_earlier.clone();
@@ -1348,20 +1367,32 @@ fn populate_sidebar(
     }
 }
 
-/// Render a single timeline event as an ActionRow.
-fn event_to_row(event: &matrix_core::TimelineEvent) -> adw::ActionRow {
+const QUICK_REACTIONS: &[&str] = &["👍", "❤️", "😂", "😮", "😢", "🎉"];
+
+/// Render a single timeline event with avatar, display name, body, and reactions.
+fn event_to_row(
+    event: &matrix_core::TimelineEvent,
+    app_state: &Arc<MatrixusApp>,
+    selected_room: &Arc<std::sync::Mutex<Option<String>>>,
+) -> gtk4::ListBoxRow {
     use matrix_core::EventContent;
 
-    let sender_short = event
-        .sender
-        .split(':')
-        .next()
-        .unwrap_or(&event.sender)
-        .trim_start_matches('@');
+    let display_name = event
+        .sender_display_name
+        .clone()
+        .unwrap_or_else(|| {
+            event
+                .sender
+                .split(':')
+                .next()
+                .unwrap_or(&event.sender)
+                .trim_start_matches('@')
+                .to_string()
+        });
 
     let body = match &event.content {
         EventContent::Text { body, .. } => body.clone(),
-        EventContent::Emote { body } => format!("* {sender_short} {body}"),
+        EventContent::Emote { body } => format!("* {display_name} {body}"),
         EventContent::Notice { body } => body.clone(),
         EventContent::Image { filename, .. } => format!("📷 {filename}"),
         EventContent::Video { filename, .. } => format!("🎥 {filename}"),
@@ -1372,13 +1403,154 @@ fn event_to_row(event: &matrix_core::TimelineEvent) -> adw::ActionRow {
         EventContent::Redacted => "🗑️ Message removed".into(),
     };
 
-    // Plain text: ActionRow title/subtitle are Pango markup by default, which
-    // warns on bare `&` / `<` in message bodies.
-    let row = adw::ActionRow::builder()
-        .title(sender_short)
-        .subtitle(&body)
-        .use_markup(false)
+    // Outer horizontal: avatar | content
+    let hbox = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    hbox.set_margin_start(8);
+    hbox.set_margin_end(8);
+    hbox.set_margin_top(4);
+    hbox.set_margin_bottom(4);
+
+    let avatar = adw::Avatar::new(36, Some(&display_name), true);
+    avatar.set_valign(gtk4::Align::Start);
+    hbox.append(&avatar);
+
+    // Async-load avatar image when we have an MXC URL.
+    // GTK widgets are !Send — wrap in UiSend and only touch them on the UI thread.
+    if let Some(mxc) = event.sender_avatar_url.clone() {
+        let avatar_w = async_ui::UiSend::new(avatar.clone());
+        let app = app_state.clone();
+        tokio::spawn(async move {
+            match app.download_media(&mxc, true).await {
+                Ok(bytes) if !bytes.is_empty() => {
+                    // Keep Vec<u8> across the thread boundary; build glib::Bytes on UI thread.
+                    async_ui::on_ui(move || {
+                        let avatar_w = avatar_w.into_inner();
+                        let bytes = glib::Bytes::from_owned(bytes);
+                        match gtk4::gdk::Texture::from_bytes(&bytes) {
+                            Ok(texture) => {
+                                avatar_w.set_custom_image(Some(&texture));
+                            }
+                            Err(e) => {
+                                tracing::debug!("Avatar texture decode failed: {e}");
+                            }
+                        }
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => tracing::debug!("Avatar download failed: {e}"),
+            }
+        });
+    }
+
+    let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    vbox.set_hexpand(true);
+
+    let name_label = gtk4::Label::builder()
+        .label(&display_name)
+        .halign(gtk4::Align::Start)
+        .css_classes(["heading"])
+        .selectable(true)
         .build();
+    vbox.append(&name_label);
+
+    let body_label = gtk4::Label::builder()
+        .label(&body)
+        .halign(gtk4::Align::Start)
+        .wrap(true)
+        .wrap_mode(gtk4::pango::WrapMode::WordChar)
+        .xalign(0.0)
+        .selectable(true)
+        .build();
+    // Avoid Pango markup interpreting user text.
+    body_label.set_use_markup(false);
+    vbox.append(&body_label);
+
+    // Reaction chips + add-reaction menu
+    let react_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+    react_box.set_margin_top(2);
+
+    for reaction in &event.reactions {
+        let label = if reaction.count > 1 {
+            format!("{} {}", reaction.key, reaction.count)
+        } else {
+            reaction.key.clone()
+        };
+        let chip = gtk4::Button::builder()
+            .label(&label)
+            .css_classes(["flat", "circular"])
+            .build();
+        if reaction.reacted_by_me {
+            chip.add_css_class("suggested-action");
+        }
+        chip.set_tooltip_text(Some(&format!(
+            "{} × {}",
+            reaction.key, reaction.count
+        )));
+        // Clicking an existing reaction sends another of the same key.
+        let key = reaction.key.clone();
+        let event_id = event.event_id.clone();
+        let app = app_state.clone();
+        let room_sel = selected_room.clone();
+        chip.connect_clicked(move |_| {
+            let room_id = room_sel.lock().ok().and_then(|g| g.clone());
+            let Some(room_id) = room_id else { return };
+            let app = app.clone();
+            let event_id = event_id.clone();
+            let key = key.clone();
+            tokio::spawn(async move {
+                if let Err(e) = app.send_reaction(&room_id, &event_id, &key).await {
+                    tracing::warn!("Failed to send reaction: {e}");
+                }
+            });
+        });
+        react_box.append(&chip);
+    }
+
+    // "+" button with quick emoji popover
+    let add_btn = gtk4::MenuButton::builder()
+        .label("＋")
+        .css_classes(["flat", "circular"])
+        .tooltip_text("Add reaction")
+        .build();
+    let popover = gtk4::Popover::new();
+    let emoji_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+    emoji_box.set_margin_start(6);
+    emoji_box.set_margin_end(6);
+    emoji_box.set_margin_top(4);
+    emoji_box.set_margin_bottom(4);
+    for &emoji in QUICK_REACTIONS {
+        let btn = gtk4::Button::with_label(emoji);
+        btn.add_css_class("flat");
+        let event_id = event.event_id.clone();
+        let app = app_state.clone();
+        let room_sel = selected_room.clone();
+        let popover_c = popover.clone();
+        btn.connect_clicked(move |_| {
+            popover_c.popdown();
+            let room_id = room_sel.lock().ok().and_then(|g| g.clone());
+            let Some(room_id) = room_id else { return };
+            let app = app.clone();
+            let event_id = event_id.clone();
+            let key = emoji.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = app.send_reaction(&room_id, &event_id, &key).await {
+                    tracing::warn!("Failed to send reaction: {e}");
+                }
+            });
+        });
+        emoji_box.append(&btn);
+    }
+    popover.set_child(Some(&emoji_box));
+    add_btn.set_popover(Some(&popover));
+    react_box.append(&add_btn);
+
+    vbox.append(&react_box);
+    hbox.append(&vbox);
+
+    let row = gtk4::ListBoxRow::new();
+    row.set_child(Some(&hbox));
+    row.set_activatable(false);
+    row.set_selectable(false);
     row
 }
 

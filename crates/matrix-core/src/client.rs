@@ -6,14 +6,17 @@ use url::Url;
 
 use matrix_sdk::{
     authentication::{matrix::MatrixSession as SdkMatrixSession, SessionTokens},
+    media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings},
     room::MessagesOptions,
     ruma::{
         events::{
+            reaction::ReactionEventContent,
+            relation::Annotation,
             room::message::{MessageType, RoomMessageEventContent},
             room::MediaSource,
             SyncMessageLikeEvent,
         },
-        OwnedDeviceId, RoomId, UserId,
+        EventId, OwnedDeviceId, OwnedMxcUri, RoomId, UInt, UserId,
     },
     store::RoomLoadSettings,
     Client, SessionMeta,
@@ -24,7 +27,7 @@ use crate::crypto::{
     CryptoStatus, DeviceInfo, DeviceTrustLevel, RoomEncryptionInfo, SasEmoji, VerificationState,
 };
 use crate::error::{MatrixError, Result};
-use crate::room::{EventContent, RoomSummary, TimelineEvent};
+use crate::room::{EventContent, ReactionSummary, RoomSummary, TimelineEvent};
 use crate::session::MatrixSession;
 
 /// Main Matrix client engine managing homeserver connection and state
@@ -286,7 +289,23 @@ impl MatrixClient {
             .map_err(|e| MatrixError::Other(format!("Failed to fetch messages: {e}")))?;
 
         let mut events = Vec::new();
+        // Collect reactions found in this page: target_event_id -> (key -> count/senders)
+        let mut reaction_map: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, (u32, bool)>,
+        > = std::collections::HashMap::new();
+        let own_user = self.inner.user_id().map(|u| u.to_string());
+
         for sdk_event in &response.chunk {
+            if let Some((target, key, sender)) = map_reaction_event(sdk_event) {
+                let entry = reaction_map.entry(target).or_default();
+                let (count, me) = entry.entry(key).or_insert((0, false));
+                *count += 1;
+                if own_user.as_ref() == Some(&sender) {
+                    *me = true;
+                }
+                continue;
+            }
             match map_timeline_event(sdk_event) {
                 Some(ev) => events.push(ev),
                 None => {
@@ -297,6 +316,29 @@ impl MatrixClient {
 
         // `/messages` backward returns newest-first; reverse so oldest is first.
         events.reverse();
+
+        // Attach reactions and enrich sender profile from room membership.
+        for ev in &mut events {
+            if let Some(keys) = reaction_map.get(&ev.event_id) {
+                let mut reactions: Vec<ReactionSummary> = keys
+                    .iter()
+                    .map(|(key, (count, me))| ReactionSummary {
+                        key: key.clone(),
+                        count: *count,
+                        reacted_by_me: *me,
+                    })
+                    .collect();
+                reactions.sort_by(|a, b| a.key.cmp(&b.key));
+                ev.reactions = reactions;
+            }
+            if let Ok(uid) = <&UserId>::try_from(ev.sender.as_str()) {
+                if let Ok(Some(member)) = room.get_member_no_sync(uid).await {
+                    ev.sender_display_name = Some(member.name().to_string());
+                    ev.sender_avatar_url = member.avatar_url().map(|u| u.to_string());
+                }
+            }
+        }
+
         let end_token = response.end;
         info!(
             "Mapped {} timeline event(s) for {room_id}; end_token={}",
@@ -304,6 +346,56 @@ impl MatrixClient {
             end_token.as_deref().unwrap_or("<none>")
         );
         Ok(crate::room::TimelinePage { events, end_token })
+    }
+
+    /// Send an emoji reaction (`m.reaction`) to an existing event.
+    pub async fn send_reaction(
+        &self,
+        room_id: &str,
+        event_id: &str,
+        key: &str,
+    ) -> Result<String> {
+        let room_id = <&RoomId>::try_from(room_id)
+            .map_err(|e| MatrixError::RoomNotFound(format!("Invalid room ID: {e}")))?;
+        let event_id = <&EventId>::try_from(event_id)
+            .map_err(|e| MatrixError::Other(format!("Invalid event ID: {e}")))?;
+
+        let room = self
+            .inner
+            .get_room(room_id)
+            .ok_or_else(|| MatrixError::RoomNotFound(format!("Room not found: {room_id}")))?;
+
+        let content = ReactionEventContent::new(Annotation::new(
+            event_id.to_owned(),
+            key.to_owned(),
+        ));
+        let response = room.send(content).await?;
+        Ok(response.response.event_id.to_string())
+    }
+
+    /// Download media bytes for an MXC URI (avatars, thumbnails, etc.).
+    ///
+    /// Uses a small scaled thumbnail when `thumbnail` is true (good for avatars).
+    pub async fn download_media(&self, mxc_uri: &str, thumbnail: bool) -> Result<Vec<u8>> {
+        let mxc: OwnedMxcUri = OwnedMxcUri::from(mxc_uri);
+        if !mxc.is_valid() {
+            return Err(MatrixError::Other(format!("Invalid MXC URI: {mxc_uri}")));
+        }
+        let source = MediaSource::Plain(mxc);
+        let format = if thumbnail {
+            MediaFormat::Thumbnail(MediaThumbnailSettings::new(
+                UInt::from(64u32),
+                UInt::from(64u32),
+            ))
+        } else {
+            MediaFormat::File
+        };
+        let request = MediaRequestParameters { source, format };
+        self.inner
+            .media()
+            .get_media_content(&request, true)
+            .await
+            .map_err(|e| MatrixError::Other(format!("Failed to download media: {e}")))
     }
 
     /// Send a plain text message to a room
@@ -951,22 +1043,49 @@ fn map_timeline_event(
                 Some(TimelineEvent {
                     event_id: ev.event_id.to_string(),
                     sender: ev.sender.to_string(),
+                    sender_display_name: None,
+                    sender_avatar_url: None,
                     timestamp_millis,
                     content,
                     reply_to: None,
+                    reactions: Vec::new(),
                 })
             }
             AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Redacted(ev)) => {
                 Some(TimelineEvent {
                     event_id: ev.event_id.to_string(),
                     sender: ev.sender.to_string(),
+                    sender_display_name: None,
+                    sender_avatar_url: None,
                     timestamp_millis: ev.origin_server_ts.0.into(),
                     content: EventContent::Redacted,
                     reply_to: None,
+                    reactions: Vec::new(),
                 })
             }
             _ => None,
         },
         AnySyncTimelineEvent::State(_) => None,
+    }
+}
+
+/// Extract a reaction annotation from a timeline event, if it is `m.reaction`.
+///
+/// Returns `(target_event_id, reaction_key, sender_user_id)`.
+fn map_reaction_event(
+    sdk_event: &matrix_sdk::deserialized_responses::TimelineEvent,
+) -> Option<(String, String, String)> {
+    use matrix_sdk::ruma::events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent};
+
+    let any: AnySyncTimelineEvent = sdk_event.raw().deserialize().ok()?;
+    match any {
+        AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::Reaction(
+            SyncMessageLikeEvent::Original(ev),
+        )) => Some((
+            ev.content.relates_to.event_id.to_string(),
+            ev.content.relates_to.key.clone(),
+            ev.sender.to_string(),
+        )),
+        _ => None,
     }
 }
