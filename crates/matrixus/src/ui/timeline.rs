@@ -7,6 +7,10 @@ use matrix_core::TimelineEvent;
 pub struct TimelineState {
     pub room_id: String,
     pub events: Vec<TimelineEvent>,
+    /// Token for the next older `/messages` page. `None` after history start.
+    pub prev_batch: Option<String>,
+    /// True once a back-pagination returned no further `end` token.
+    pub reached_start: bool,
 }
 
 impl TimelineState {
@@ -14,6 +18,8 @@ impl TimelineState {
         Self {
             room_id: room_id.into(),
             events: Vec::new(),
+            prev_batch: None,
+            reached_start: false,
         }
     }
 
@@ -23,5 +29,7 @@ impl TimelineState {
 
     pub fn clear(&mut self) {
         self.events.clear();
+        self.prev_batch = None;
+        self.reached_start = false;
     }
 }
