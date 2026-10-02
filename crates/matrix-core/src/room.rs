@@ -25,6 +25,17 @@ pub struct RoomSummary {
     pub last_event: Option<TimelineEvent>,
 }
 
+/// Aggregated emoji reaction on a message
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ReactionSummary {
+    /// Emoji / reaction key (e.g. "👍")
+    pub key: String,
+    /// Number of users who reacted with this key
+    pub count: u32,
+    /// Whether the current account has reacted with this key
+    pub reacted_by_me: bool,
+}
+
 /// A parsed timeline event for presentation in chat views
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TimelineEvent {
@@ -32,12 +43,18 @@ pub struct TimelineEvent {
     pub event_id: String,
     /// User ID of the sender
     pub sender: String,
+    /// Display name of the sender when known (room member profile)
+    pub sender_display_name: Option<String>,
+    /// MXC URI of the sender's avatar when known
+    pub sender_avatar_url: Option<String>,
     /// Unix timestamp in milliseconds
     pub timestamp_millis: u64,
     /// Parsed event content
     pub content: EventContent,
     /// In reply to another event ID if applicable
     pub reply_to: Option<String>,
+    /// Aggregated reactions on this event
+    pub reactions: Vec<ReactionSummary>,
 }
 
 /// One page of room history from `/messages` (oldest first).
