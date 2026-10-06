@@ -7,6 +7,7 @@ Built with **Rust**, **GTK4 / Libadwaita**, and the official [`matrix-rust-sdk`]
 **App ID:** `com.matrixus.Matrixus`  
 **Repository:** https://github.com/dev-lukaszglowacki/matrixus
 
+
 ---
 
 ## Features
@@ -113,5 +114,3 @@ flatpak-builder --user --install --force-clean build build-aux/flatpak/com.matri
 | `Ctrl+K` / `Ctrl+F` | Focus room filter |
 | `Ctrl+L` | Focus message composer |
 | `Enter` | Send message (when enabled in settings) |
-
----

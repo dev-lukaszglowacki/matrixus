@@ -29,6 +29,13 @@ pub enum SyncEvent {
         room_id: String,
         has_active_call: bool,
     },
+    /// Legacy 1:1 VoIP signalling (`m.call.invite` / answer / candidates / hangup)
+    VoipSignalling {
+        room_id: String,
+        sender: String,
+        event_type: String,
+        content: serde_json::Value,
+    },
     /// Device verification flow advanced (request, emojis, done, cancelled)
     VerificationChanged(VerificationState),
     /// Connection to the homeserver was lost / sync error
@@ -117,6 +124,16 @@ impl SyncService {
                                     let _ = self.event_sender.send(SyncEvent::TimelineUpdated {
                                         room_id: rid.clone(),
                                         event,
+                                    });
+                                }
+                                if let Some((event_type, sender, content)) =
+                                    crate::client::extract_voip_event(raw)
+                                {
+                                    let _ = self.event_sender.send(SyncEvent::VoipSignalling {
+                                        room_id: rid.clone(),
+                                        sender,
+                                        event_type,
+                                        content,
                                     });
                                 }
                             }

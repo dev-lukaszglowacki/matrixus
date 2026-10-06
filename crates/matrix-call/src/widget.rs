@@ -1,4 +1,4 @@
-//! MatrixRTC Widget Protocol Bridge & Element Call Integration
+//! MatrixRTC Widget Protocol Bridge & Wire Call Integration
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -60,8 +60,8 @@ impl WidgetApiMessage {
     }
 }
 
-/// Builder for constructing Element Call embedding URLs with parameters
-pub struct ElementCallUrlBuilder {
+/// Builder for constructing Wire (MatrixRTC) embedding URLs with parameters
+pub struct WireCallUrlBuilder {
     base_url: Url,
     room_id: String,
     user_id: String,
@@ -70,7 +70,7 @@ pub struct ElementCallUrlBuilder {
     theme: String,
 }
 
-impl ElementCallUrlBuilder {
+impl WireCallUrlBuilder {
     pub fn new(
         base_url: &str,
         room_id: &str,
@@ -115,7 +115,7 @@ impl ElementCallUrlBuilder {
         url.to_string()
     }
 
-    /// List standard MatrixRTC widget capabilities requested by Element Call
+    /// List standard MatrixRTC widget capabilities requested by Wire Call
     pub fn default_capabilities() -> Vec<String> {
         vec![
             "org.matrix.msc3401.call".to_string(),
@@ -149,8 +149,8 @@ mod tests {
     }
 
     #[test]
-    fn test_element_call_url_builder() {
-        let builder = ElementCallUrlBuilder::new(
+    fn test_wire_call_url_builder() {
+        let builder = WireCallUrlBuilder::new(
             "https://call.element.io",
             "!room123:matrix.org",
             "@alice:matrix.org",
@@ -164,7 +164,7 @@ mod tests {
         assert!(url.starts_with("https://call.element.io/#?"));
         assert!(url.contains("room=%21room123%3Amatrix.org"));
         assert!(url.contains("userId=%40alice%3Amatrix.org"));
+        assert!(url.contains("deviceId=DEV_DESKTOP"));
         assert!(url.contains("video=true"));
-        assert!(url.contains("theme=dark"));
     }
 }

@@ -1,6 +1,7 @@
 //! Matrixus
 
 pub mod app;
+pub mod voip_bridge;
 pub mod desktop;
 pub mod settings;
 pub mod ui;

@@ -6,7 +6,8 @@ use tokio::sync::
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use matrix_call::CallSession;
+use matrix_call::{CallInvite, CallSession, NativeCallEngine, PeerConnectionConfig};
+use crate::voip_bridge::{VoipBridge};
 use matrix_core::{
     CryptoStatus, DeviceInfo, FileSessionStore, MatrixClient, RoomEncryptionInfo, SessionStore,
     SyncEvent, SyncService, VerificationState,
@@ -26,6 +27,8 @@ pub struct MatrixusApp {
     pub state: Arc<Mutex<MainWindowState>>,
     /// User preferences (theme, notifications, tray, …)
     pub settings: Arc<StdMutex<AppSettings>>,
+    /// Native WebRTC ↔ Matrix VoIP signalling bridge
+    pub voip: Arc<VoipBridge>,
     /// Broadcast sender for sync events (cloned by subscribers)
     sync_tx: Arc<Mutex<Option<broadcast::Sender<SyncEvent>>>>,
     /// Background sync task handle
@@ -50,12 +53,15 @@ impl MatrixusApp {
         notifications.set_messages_enabled(settings.notifications_enabled);
         notifications.set_calls_enabled(settings.call_notifications_enabled);
 
+        let client: Arc<Mutex<Option<MatrixClient>>> = Arc::new(Mutex::new(None));
+        let voip = Arc::new(VoipBridge::new(client.clone()));
         Self {
-            client: Arc::new(Mutex::new(None)),
+            client,
             session_store: Arc::new(FileSessionStore::new(session_path)),
             notifications,
             state: Arc::new(Mutex::new(MainWindowState::new())),
             settings: Arc::new(StdMutex::new(settings)),
+            voip,
             sync_tx: Arc::new(Mutex::new(None)),
             sync_handle: Arc::new(Mutex::new(None)),
         }
@@ -485,13 +491,33 @@ impl MatrixusApp {
         );
         let mut session = CallSession::new(&call_id, room_id, is_video);
         let _ = session.start_ringing();
-        let controller = crate::ui::CallViewController::new(session, &user_id, &device_id);
+
+        // Native WebRTC engine (1:1 Matrix m.call signalling)
+        let engine = std::sync::Arc::new(NativeCallEngine::new(
+            session.clone(),
+            PeerConnectionConfig {
+                party_id: device_id.clone(),
+                ..PeerConnectionConfig::default()
+            },
+        ));
+        // Kick off offer generation (emits PeerEvent::LocalOffer for the sender task)
+        let engine_place = engine.clone();
+        tokio::spawn(async move {
+            if let Err(e) = engine_place.place_call().await {
+                tracing::error!("Native place_call failed: {e}");
+            }
+        });
+
+        let controller = crate::ui::CallViewController::new(session, &user_id, &device_id)
+            .with_engine(engine.clone());
+
+        // PeerEvent → m.call.* sender + local media acquire
+        self.voip
+            .attach_engine(room_id.to_string(), engine, true)
+            .await;
 
         {
             let mut state = self.state.lock().await;
-            // Store a clone-ish snapshot is hard without Clone on controller;
-            // we move ownership to the caller and keep room_id marker via active_call
-            // by reconstructing a lightweight session marker.
             state.active_call = Some(crate::ui::CallViewController::new(
                 CallSession::new(&call_id, room_id, is_video),
                 &user_id,
@@ -519,18 +545,76 @@ impl MatrixusApp {
     }
 
     /// Accept an incoming call for `room_id` and return a controller for the call window.
+    /// Accept an incoming call, applying the remote SDP offer from `m.call.invite`.
     pub async fn accept_incoming_call(
         &self,
         room_id: &str,
         is_video: bool,
+        invite: Option<CallInvite>,
     ) -> anyhow::Result<crate::ui::CallViewController> {
-        self.start_call(room_id, is_video).await
+        let client_guard = self.client.lock().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Not logged in"))?;
+        let user_id = client.user_id().unwrap_or_default();
+        let device_id = client.device_id().unwrap_or_default();
+        drop(client_guard);
+
+        let call_id = invite
+            .as_ref()
+            .map(|i| i.call_id.clone())
+            .unwrap_or_else(|| {
+                format!(
+                    "call_{}_{}",
+                    room_id,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0)
+                )
+            });
+
+        let mut session = CallSession::new(&call_id, room_id, is_video);
+        let _ = session.start_ringing();
+        let engine = std::sync::Arc::new(NativeCallEngine::new(
+            session.clone(),
+            PeerConnectionConfig {
+                party_id: device_id.clone(),
+                ..PeerConnectionConfig::default()
+            },
+        ));
+
+        if let Some(inv) = invite {
+            let eng = engine.clone();
+            tokio::spawn(async move {
+                if let Err(e) = eng.accept_invite(inv).await {
+                    tracing::error!("accept_invite failed: {e}");
+                }
+            });
+        }
+
+        let controller = crate::ui::CallViewController::new(session, &user_id, &device_id)
+            .with_engine(engine.clone());
+        self.voip
+            .attach_engine(room_id.to_string(), engine, false)
+            .await;
+
+        {
+            let mut state = self.state.lock().await;
+            state.active_call = Some(crate::ui::CallViewController::new(
+                CallSession::new(&call_id, room_id, is_video),
+                &user_id,
+                &device_id,
+            ));
+        }
+        Ok(controller)
     }
 
     /// Clear the active call marker after hang-up.
     pub async fn clear_active_call(&self) {
         let mut state = self.state.lock().await;
         state.active_call = None;
+        self.voip.clear().await;
         info!("Active call cleared");
     }
 
