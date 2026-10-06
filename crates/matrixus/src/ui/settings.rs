@@ -120,10 +120,10 @@ pub fn show_settings_window(
         .build();
 
     let call_url_row = adw::EntryRow::builder()
-        .title("Element Call URL")
+        .title("STUN / Call server (optional)")
         .build();
     if let Ok(s) = settings.lock() {
-        call_url_row.set_text(&s.element_call_url);
+        call_url_row.set_text(&s.wire_call_url);
     }
     calls_group.add(&call_url_row);
 
@@ -216,7 +216,7 @@ pub fn show_settings_window(
         let persist = persist.clone();
         call_url_row.connect_changed(move |row| {
             let v = row.text().to_string();
-            persist(Box::new(move |s| s.element_call_url = v));
+            persist(Box::new(move |s| s.wire_call_url = v));
         });
     }
 

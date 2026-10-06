@@ -1,16 +1,16 @@
 //! WebKitGTK Script Message Handler and MatrixRTC Widget IPC Bridge
 
-use matrix_call::{ElementCallUrlBuilder, WidgetApiMessage};
+use matrix_call::{WidgetApiMessage, WireCallUrlBuilder};
 use tracing::{debug, info, warn};
 
-/// Manages communication between the WebKitGTK Element Call widget and Matrix core
+/// Manages communication between the WebKitGTK Wire Call widget and Matrix core
 pub struct WidgetHostBridge {
     pub widget_id: String,
     pub room_id: String,
     pub user_id: String,
     pub device_id: String,
-    /// Base URL for Element Call (configurable via ELEMENT_CALL_URL)
-    pub element_call_url: String,
+    /// Base URL for Wire Call (configurable via WIRE_CALL_URL)
+    pub wire_call_url: String,
 }
 
 impl WidgetHostBridge {
@@ -25,28 +25,30 @@ impl WidgetHostBridge {
             room_id: room_id.into(),
             user_id: user_id.into(),
             device_id: device_id.into(),
-            element_call_url: std::env::var("ELEMENT_CALL_URL")
+            // Prefer WIRE_CALL_URL; fall back to legacy ELEMENT_CALL_URL for existing installs
+            wire_call_url: std::env::var("WIRE_CALL_URL")
+                .or_else(|_| std::env::var("ELEMENT_CALL_URL"))
                 .unwrap_or_else(|_| "https://call.element.io".to_string()),
         }
     }
 
-    /// Build the widget URL for Element Call
+    /// Build the widget URL for Wire Call
     pub fn generate_widget_url(&self, is_video: bool, theme: &str) -> String {
-        match ElementCallUrlBuilder::new(
-            &self.element_call_url,
+        match WireCallUrlBuilder::new(
+            &self.wire_call_url,
             &self.room_id,
             &self.user_id,
             &self.device_id,
         ) {
             Ok(builder) => builder.video(is_video).theme(theme).build(),
             Err(e) => {
-                warn!("Failed to build Element Call URL: {e}");
-                self.element_call_url.clone()
+                warn!("Failed to build Wire Call URL: {e}");
+                self.wire_call_url.clone()
             }
         }
     }
 
-    /// Handle an incoming postMessage from the Element Call widget.
+    /// Handle an incoming postMessage from the Wire Call widget.
     ///
     /// Returns an optional JSON response string to post back into the page.
     pub fn handle_widget_message(&self, raw_json: &str) -> Option<String> {
@@ -65,7 +67,7 @@ impl WidgetHostBridge {
 
         match msg.action.as_str() {
             "capabilities" | "org.matrix.msc2876.supported_versions" => {
-                let caps = ElementCallUrlBuilder::default_capabilities();
+                let caps = WireCallUrlBuilder::default_capabilities();
                 let response = WidgetApiMessage::new_response(
                     &self.widget_id,
                     &msg.request_id,
@@ -78,7 +80,7 @@ impl WidgetHostBridge {
                 serde_json::to_string(&response).ok()
             }
             "content_loaded" => {
-                info!("Element Call widget content loaded");
+                info!("Wire Call widget content loaded");
                 let response = WidgetApiMessage::new_response(
                     &self.widget_id,
                     &msg.request_id,

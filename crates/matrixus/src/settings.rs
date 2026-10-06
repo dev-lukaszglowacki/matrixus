@@ -16,8 +16,8 @@ pub struct AppSettings {
     pub close_to_tray: bool,
     /// Follow system color scheme (true) or force dark/light
     pub theme: ThemePreference,
-    /// Element Call base URL
-    pub element_call_url: String,
+    /// Wire Call base URL
+    pub wire_call_url: String,
     /// Enter sends message (true) vs newline
     pub enter_to_send: bool,
 }
@@ -37,7 +37,7 @@ impl Default for AppSettings {
             call_notifications_enabled: true,
             close_to_tray: false,
             theme: ThemePreference::System,
-            element_call_url: "https://call.element.io".into(),
+            wire_call_url: "https://call.element.io".into(),
             enter_to_send: true,
         }
     }

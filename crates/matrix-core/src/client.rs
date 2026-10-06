@@ -611,6 +611,34 @@ impl MatrixClient {
         Ok(response.response.event_id.to_string())
     }
 
+    /// Send a Matrix VoIP signalling event (`m.call.invite` / `answer` / `candidates` / `hangup` / `reject`).
+    pub async fn send_voip_event(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        content: serde_json::Value,
+    ) -> Result<String> {
+        let room_id_parsed = <&RoomId>::try_from(room_id)
+            .map_err(|e| MatrixError::RoomNotFound(format!("Invalid room ID: {e}")))?;
+
+        let room = self.inner.get_room(room_id_parsed).ok_or_else(|| {
+            MatrixError::RoomNotFound(format!("Room not found: {room_id}"))
+        })?;
+
+        if !content.is_object() {
+            return Err(MatrixError::Other("VoIP content must be a JSON object".into()));
+        }
+
+        // `send_raw` accepts event type + serializable content in matrix-sdk 0.19
+        let response = room
+            .send_raw(event_type, content)
+            .await
+            .map_err(|e| MatrixError::Other(format!("Failed to send {event_type}: {e}")))?;
+
+        info!("Sent VoIP event {event_type} in {room_id}: {}", response.response.event_id);
+        Ok(response.response.event_id.to_string())
+    }
+
     // ── Encryption & verification (Phase 5) ─────────────────────────────────
 
     /// Snapshot of cross-signing, device trust, and key-backup state.
@@ -1270,4 +1298,20 @@ fn map_reaction_event(
         )),
         _ => None,
     }
+}
+
+/// Try to parse an m.call.* event from a raw timeline event (for sync → UI).
+pub fn extract_voip_event(
+    sdk_event: &matrix_sdk::deserialized_responses::TimelineEvent,
+) -> Option<(String, String, serde_json::Value)> {
+    // Returns (event_type, sender, content)
+    let raw = sdk_event.raw();
+    let value: serde_json::Value = raw.deserialize_as().ok()?;
+    let event_type = value.get("type")?.as_str()?.to_string();
+    if !event_type.starts_with("m.call.") {
+        return None;
+    }
+    let sender = value.get("sender")?.as_str()?.to_string();
+    let content = value.get("content")?.clone();
+    Some((event_type, sender, content))
 }

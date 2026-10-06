@@ -642,8 +642,8 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                 settings_ui::apply_theme(s.theme);
                 app.notifications.set_messages_enabled(s.notifications_enabled);
                 app.notifications.set_calls_enabled(s.call_notifications_enabled);
-                // Propagate Element Call URL to environment for new call windows
-                std::env::set_var("ELEMENT_CALL_URL", &s.element_call_url);
+                // Propagate Wire Call URL to environment for new call windows
+                std::env::set_var("WIRE_CALL_URL", &s.wire_call_url);
             });
             settings_ui::show_settings_window(&win, settings, on_changed);
         });
@@ -1330,7 +1330,7 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                                 let app = app.clone();
                                 let rid = rid.clone();
                                 tokio::spawn(async move {
-                                    match app.accept_incoming_call(&rid, true).await {
+                                    match app.accept_incoming_call(&rid, true, None).await {
                                         Ok(controller) => {
                                             async_ui::on_ui(move || {
                                                 let w = open_call_window(controller);
@@ -1346,6 +1346,101 @@ fn show_main_window(window: &adw::ApplicationWindow, app_state: Arc<MatrixusApp>
                         });
                         dialog.present(Some(&win));
                     }
+                }
+                SyncEvent::VoipSignalling {
+                    room_id,
+                    sender,
+                    event_type,
+                    content,
+                } => {
+                    // GTK widgets are !Send — wrap parent window for the Tokio task.
+                    let app = app_state.clone();
+                    let win = crate::ui::async_ui::UiSend::new(window.clone());
+                    let rid = room_id.clone();
+                    let sender = sender.clone();
+                    let event_type = event_type.clone();
+                    let content = content.clone();
+                    tokio::spawn(async move {
+                        let action = app
+                            .voip
+                            .on_sync_voip(&rid, &sender, &event_type, content)
+                            .await;
+                        match action {
+                            Some(crate::voip_bridge::IncomingVoipAction::Ring {
+                                room_id: r,
+                                call_id: _,
+                                is_video,
+                                sender: from,
+                                invite,
+                            }) => {
+                                let app2 = app.clone();
+                                app.notifications.show_incoming_call_notification(
+                                    &r, &from, &r, is_video,
+                                );
+                                crate::ui::async_ui::on_ui(move || {
+                                    let parent = win.into_inner();
+                                    let heading = if is_video {
+                                        "Incoming video call"
+                                    } else {
+                                        "Incoming voice call"
+                                    };
+                                    let body = format!("From {from} in {r}");
+                                    let dialog = adw::AlertDialog::builder()
+                                        .heading(heading)
+                                        .body(&body)
+                                        .build();
+                                    dialog.add_response("decline", "Decline");
+                                    dialog.add_response("accept", "Accept");
+                                    dialog.set_response_appearance(
+                                        "accept",
+                                        adw::ResponseAppearance::Suggested,
+                                    );
+                                    dialog.set_default_response(Some("accept"));
+                                    dialog.set_close_response("decline");
+                                    let app3 = app2.clone();
+                                    let room = r.clone();
+                                    let inv = invite.clone();
+                                    dialog.connect_response(None, move |dialog, response| {
+                                        dialog.close();
+                                        if response == "accept" {
+                                            let app = app3.clone();
+                                            let room = room.clone();
+                                            let inv = inv.clone();
+                                            tokio::spawn(async move {
+                                                match app
+                                                    .accept_incoming_call(
+                                                        &room,
+                                                        is_video,
+                                                        Some(inv),
+                                                    )
+                                                    .await
+                                                {
+                                                    Ok(controller) => {
+                                                        crate::ui::async_ui::on_ui(move || {
+                                                            let w = open_call_window(controller);
+                                                            w.present();
+                                                        });
+                                                    }
+                                                    Err(e) => tracing::error!(
+                                                        "Accept VoIP failed: {e}"
+                                                    ),
+                                                }
+                                            });
+                                        }
+                                    });
+                                    dialog.present(Some(&parent));
+                                });
+                            }
+                            Some(crate::voip_bridge::IncomingVoipAction::RemoteEnded {
+                                call_id,
+                                ..
+                            }) => {
+                                tracing::info!("Remote ended call {call_id}");
+                                app.clear_active_call().await;
+                            }
+                            None => {}
+                        }
+                    });
                 }
                 SyncEvent::SyncError(_) => {}
             }

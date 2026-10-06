@@ -17,4 +17,15 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 url = { workspace = true }
 urlencoding = "2.1"
-matrix-sdk = { workspace = true, features = ["experimental-widgets"] }
+matrix-sdk = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+bytes = "1"
+base64 = "0.22"
+
+# Native WebRTC (1:1 Matrix VoIP)
+webrtc = { version = "0.21", optional = true }
+
+[features]
+default = []
+native-webrtc = ["dep:webrtc"]
+widget = [] # legacy Element/Wire widget path (kept for reference, off by default)
